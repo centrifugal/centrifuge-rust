@@ -59,7 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backend_token(serde_json::json!({ "sub": "user-42", "exp": exp(10) })).await?;
             Ok(Some(token))
         })
+        .on_connecting(|_, e| println!("connecting: {} ({})", e.reason, e.code))
         .on_connected(|_, _| println!("connected"))
+        .on_disconnected(|_, e| println!("disconnected: {} ({})", e.reason, e.code))
         .on_error(|_, e| eprintln!("error: {}", e.error))
         .build()?;
 
@@ -72,7 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         })
+        .on_subscribing(|_, e| println!("subscribing: {} ({})", e.reason, e.code))
         .on_subscribed(|s, _| println!("subscribed to {}", s.channel()))
+        .on_unsubscribed(|_, e| println!("unsubscribed: {} ({})", e.reason, e.code))
         .build()?;
     sub.subscribe();
     client.connect()?;

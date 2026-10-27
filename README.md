@@ -37,6 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let token = my_backend::connection_token().await?;
             Ok(Some(token))
         })
+        // Connecting happens on every reconnect: a good place to show "offline".
+        .on_connecting(|_client, e| println!("connecting: {} ({})", e.reason, e.code))
         .on_connected(|_client, e| println!("connected, client id {}", e.client_id))
         .on_disconnected(|_client, e| println!("disconnected: {} ({})", e.reason, e.code))
         .build()?;
@@ -46,7 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // A token for this channel, also refreshed before it expires.
         .get_token(|ctx| async move { Ok(my_backend::subscription_token(&ctx.channel).await?) })
         .recoverable(true)
+        // Subscribing happens on every resubscribe, after a reconnect too.
+        .on_subscribing(|_sub, e| println!("subscribing: {} ({})", e.reason, e.code))
         .on_subscribed(|sub, _| println!("subscribed to {}", sub.channel()))
+        .on_unsubscribed(|_sub, e| println!("unsubscribed: {} ({})", e.reason, e.code))
         .on_publication(|_sub, e| println!("{}", String::from_utf8_lossy(&e.data)))
         .build()?;
 

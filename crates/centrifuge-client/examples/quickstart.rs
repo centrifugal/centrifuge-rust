@@ -43,9 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             |ctx| async move { Ok(backend::subscription_token("user-42", &ctx.channel).await?) },
         )
         .recoverable(true)
+        .on_subscribing(|_, e| println!("subscribing: {} ({})", e.reason, e.code))
         .on_subscribed(|s, e| {
             println!("subscribed to {} (recovered: {})", s.channel(), e.recovered);
         })
+        .on_unsubscribed(|_, e| println!("unsubscribed: {} ({})", e.reason, e.code))
         .on_publication(|_, e| {
             println!(
                 "publication {}: {}",
