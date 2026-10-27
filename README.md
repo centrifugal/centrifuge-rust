@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `my_backend` stands for your app server, which issues the JWTs ([connection](https://centrifugal.dev/docs/server/authentication) and [channel](https://centrifugal.dev/docs/server/channel_token_auth) tokens). With a static token, use `.token(…)` instead of `.get_token(…)`.
 
-More in [`crates/centrifuge-client/examples`](crates/centrifuge-client/examples): a terminal chat with typed JSON, token refresh, streams with `select!`, recovery across restarts, server-side subscriptions, and the patterns for a desktop app.
+More in [`crates/centrifuge-client/examples`](crates/centrifuge-client/examples): a terminal chat with typed JSON, token refresh, streams with `select!`, recovery across restarts, app-owned state with `get_state`, delta compression, binary payloads over Protobuf, server-side subscriptions, and the patterns for a desktop app.
 
 ```sh
 docker compose up -d                      # Centrifugo on localhost:8010 (and 8012, secure)

@@ -53,6 +53,14 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 name = "chat"
 required-features = ["serde"]
 
+[[example]]
+name = "delta"
+required-features = ["delta"]
+
+[[example]]
+name = "protobuf"
+required-features = ["json"] # it also shows a JSON client
+
 [features]
 default = ["json", "http-stream", "system-proxy", "aws-lc-rs", "delta", "serde"]
 # The JSON protocol. Protobuf, the default protocol, is always built in.

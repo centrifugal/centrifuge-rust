@@ -1448,7 +1448,7 @@ The target setup: the Rust backend owns the connection for the life of the proce
 ## 14. Documentation and examples
 
 - A README with quick start, feature matrix row and links to centrifugal.dev.
-- `examples/`: `tauri` (§13), `chat` (JSON, subscriptions, publish), `protobuf`, `token_refresh` (`get_token` against a backend), `server_side_subs`, `recovery`, `get_state`, `delta`.
+- `examples/`: `quickstart`, `desktop_app` (the §13 patterns, without a GUI dependency), `chat` (typed JSON, subscriptions, publish), `protobuf` (binary payloads), `token_refresh` (`get_token` against a backend), `server_side_subscriptions`, `streams`, `recovery` (`since` across restarts), `get_state` (app-owned state, reloaded when recovery fails), `delta` (Fossil delta, bytes saved).
 - Rustdoc on every public item, with the state diagrams and code tables from §6–§7.
 - After release, add a Rust column to the feature matrix in `centrifugal.dev/docs/transports/client_sdk.md`, and Rust tabs to `client_api.md`.
 
