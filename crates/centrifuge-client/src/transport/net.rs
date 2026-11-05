@@ -163,14 +163,40 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAll {
     }
 }
 
+/// The OS verifier (docs/spec.md §5.2). Android's trusts the OS store only:
+/// rustls-platform-verifier has no extra roots there, so they are refused
+/// rather than silently dropped.
+fn platform_verifier(
+    tls: &TlsConfig,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> Result<rustls_platform_verifier::Verifier, crate::Error> {
+    #[cfg(target_os = "android")]
+    {
+        if !tls.extra_roots.is_empty() {
+            return Err(crate::Error::Configuration(
+                "TLS: extra roots aren't supported on Android; install the CA in the OS store or use TlsConfig::rustls_client_config".into(),
+            ));
+        }
+        rustls_platform_verifier::Verifier::new(provider).map_err(|e| tls_error(&e))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        rustls_platform_verifier::Verifier::new_with_extra_roots(tls.extra_roots.clone(), provider)
+            .map_err(|e| tls_error(&e))
+    }
+}
+
+fn tls_error(e: &rustls::Error) -> crate::Error {
+    crate::Error::Configuration(format!("TLS: {e}"))
+}
+
 impl Net {
     pub(crate) fn new(
         proxy: ProxyConfig,
         tls: &TlsConfig,
         handshake_timeout: std::time::Duration,
     ) -> Result<Self, crate::Error> {
-        let cfg =
-            Self::tls_config(tls).map_err(|e| crate::Error::Configuration(format!("TLS: {e}")))?;
+        let cfg = Self::tls_config(tls)?;
         Ok(Self {
             proxy: Mutex::new(proxy),
             tls: cfg,
@@ -180,24 +206,22 @@ impl Net {
         })
     }
 
-    fn tls_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, rustls::Error> {
+    fn tls_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, crate::Error> {
         #[cfg(feature = "rustls-config")]
         if let Some(c) = &tls.custom {
             return Ok(c.clone());
         }
         let provider = provider();
         let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()?;
+            .with_safe_default_protocol_versions()
+            .map_err(|e| tls_error(&e))?;
         let cfg = if tls.accept_invalid {
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(AcceptAll(provider)))
                 .with_no_client_auth()
         } else {
-            let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
-                tls.extra_roots.clone(),
-                provider,
-            )?;
+            let verifier = platform_verifier(tls, provider)?;
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))

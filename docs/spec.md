@@ -570,6 +570,7 @@ pub enum ProxyTarget { Direct, Http { .. }, Socks5 { .. } }  // ProxyTarget::htt
 - **Proxy auth is Basic (HTTP) and username/password (SOCKS5) only.** NTLM and Kerberos (Negotiate) aren't supported. The documented workaround for NTLM-only corporate proxies is a local helper such as Px or Cntlm, used as a plain HTTP proxy. Native NTLM/Kerberos is added only if users confirm they need it. The users who asked for proxy support are being asked.
 - Changing the proxy at runtime: `client.set_proxy(ProxyConfig)` takes effect on the next connect attempt (phase 1). The app can call `disconnect()` + `connect()` to apply it at once.
 - TLS trust: by default the OS verifier via `rustls-platform-verifier`, which uses the OS store and its trust settings. On Linux it uses the system bundle (`SSL_CERT_FILE` honoured); no roots are bundled (§15 #26). Corporate TLS-inspecting proxies install their CA in the OS store, so the OS store must be used (§3.2). `TlsConfig` can add PEM CAs (`Verifier::new_with_extra_roots`), skip verification for development only (`danger_accept_invalid_certs`, which logs a warning on every connect), or take a full `rustls::ClientConfig` behind the `rustls-config` feature.
+- **Mobile.** iOS verifies with the Security framework, as macOS does, extra roots included. On Android the platform verifier asks the system trust manager through JNI and takes no extra roots (rustls-platform-verifier 0.7 has no `Verifier::new_with_extra_roots` there), so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` instead of dropping them. The app does the verifier's Android setup before its first connect: the verifier's Kotlin component in its Gradle build (kept out of Proguard), and one call to `rustls_platform_verifier::android::init_with_env` (or `init_with_refs`, `init_with_runtime`) with the JNI env and an Android `Context`, through its own `rustls-platform-verifier` 0.7 dependency. Without it, the first certificate check panics in the verifier. An app that would rather not touch the JVM passes its own `rustls::ClientConfig` (`rustls-config`, e.g. with `webpki-roots`), which can carry extra roots but no longer follows the device's CA store and its updates.
 - The proxy and TLS stack is one connector: DNS and TCP (each address in turn, with a share of the handshake timeout), the CONNECT or SOCKS5 handshake, then `tokio-rustls`. Both transports use it, so proxy and TLS behaviour can't differ between WebSocket and HTTP-streaming.
 
 ### 5.3 Framing
@@ -1365,6 +1366,7 @@ Everything runs in GitHub Actions. Nothing is released from a laptop.
 - `cargo hack --feature-powerset`, and `cargo minimal-versions` (the lower bounds in `Cargo.toml` must build).
 - Rustdoc on nightly with `--cfg docsrs -D warnings`.
 - `centrifuge-client-core` builds for `wasm32-unknown-unknown` (§9.11).
+- `centrifuge-client` builds for `aarch64-linux-android` and `aarch64-apple-ios` (build only: the platform verifier's API differs there, §5.2).
 - Coverage (`cargo-llvm-cov` → Codecov via OIDC).
 - `cargo-deny`: advisories, licenses, bans, sources.
 - `typos`, and `zizmor` for workflow security.

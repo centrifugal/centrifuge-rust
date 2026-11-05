@@ -227,6 +227,47 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+  # Build only: the platform verifier's API differs on mobile (docs/spec.md §5.2).
+  # cargo-ndk points aws-lc-rs's C build at the runner's NDK (ANDROID_NDK_HOME).
+  android:
+    name: builds for Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-ndk
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo ndk -t arm64-v8a check -p centrifuge-client --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+
+  ios:
+    name: builds for iOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check -p centrifuge-client --target aarch64-apple-ios --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+
   deny:
     name: cargo-deny (${{ matrix.checks }})
     runs-on: ubuntu-latest
@@ -270,7 +311,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, deny, typos, zizmor]
+    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, android, ios, deny, typos, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled
