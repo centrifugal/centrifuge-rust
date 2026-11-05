@@ -156,7 +156,8 @@ async fn falls_back_to_http_stream() {
             ])
             .proxy(ProxyConfig::None)
             .handshake_timeout(Duration::from_millis(300))
-            .min_reconnect_delay(Duration::from_secs(5)),
+            .min_reconnect_delay(Duration::from_secs(30))
+            .max_reconnect_delay(Duration::from_secs(30)),
             &r,
         )
         .build()
@@ -168,9 +169,10 @@ async fn falls_back_to_http_stream() {
             "connected HttpStream",
             "{refusal}"
         );
-        // No backoff delay in the first round (min_reconnect_delay is 5 s).
+        // No backoff delay in the first round (min_reconnect_delay is 30 s; the
+        // bound is loose so a slow CI runner cannot trip it).
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(10),
             "{refusal}: {:?}",
             started.elapsed()
         );
