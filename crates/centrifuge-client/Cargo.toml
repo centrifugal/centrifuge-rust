@@ -38,6 +38,10 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 url = "2.5"
 
+# `centrifuge::android` names jni types; the same version rustls-platform-verifier uses.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22", default-features = false }
+
 [dev-dependencies]
 centrifuge-fake-server = { path = "../centrifuge-fake-server" }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }

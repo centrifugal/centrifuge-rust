@@ -34,7 +34,7 @@ use crate::shared::{CallConfig, Command, Shared, lock};
 use crate::stats::Statistics;
 use crate::stream::EventStream;
 use crate::subscription::{Subscription, SubscriptionBuilder};
-use crate::transport::net::Net;
+use crate::transport::net::{Net, uses_tls};
 
 /// Passed to the connection token getter. Empty for now; it may carry more
 /// context later.
@@ -924,7 +924,15 @@ impl ClientBuilder {
             }
             None => None,
         };
+        // A TLS endpoint or proxy can't work without the verifier's setup, so
+        // say so here instead of retrying forever (docs/spec.md §5.2).
+        #[cfg(target_os = "android")]
+        let needs_tls = configured_tls(&endpoints, emulation_endpoint.as_ref(), &self.proxy);
         let net = Arc::new(Net::new(self.proxy, &self.tls, self.handshake_timeout)?);
+        #[cfg(target_os = "android")]
+        if needs_tls {
+            net.android_tls_ready().map_err(Error::Configuration)?;
+        }
 
         let core = Core::new(CoreConfig {
             protocol: self.protocol,
@@ -994,6 +1002,26 @@ fn random_seed() -> u64 {
     h.finish()
 }
 
+/// Whether a connection known at `build()` uses TLS: a `wss`/`https`
+/// endpoint, an `https` emulation endpoint (only HTTP-streaming uses it), or an
+/// explicit `https` proxy. Proxies from the environment, the OS, a custom
+/// function or `set_proxy` are only known per connection attempt, and are
+/// checked there. Android refuses these at `build()` until the verifier's setup
+/// (docs/spec.md §5.2).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn configured_tls(
+    endpoints: &[(TransportKind, Url)],
+    emulation: Option<&Url>,
+    proxy: &ProxyConfig,
+) -> bool {
+    let streaming = endpoints
+        .iter()
+        .any(|(k, _)| *k == TransportKind::HttpStream);
+    endpoints.iter().any(|(_, u)| uses_tls(u))
+        || (streaming && emulation.is_some_and(uses_tls))
+        || matches!(proxy, ProxyConfig::Http { url, .. } if uses_tls(url))
+}
+
 #[allow(dead_code)]
 fn _assert_traits() {
     fn send_sync<T: Send + Sync>() {}
@@ -1002,4 +1030,60 @@ fn _assert_traits() {
     send_sync::<ConnectedEvent>();
     send_sync::<ErrorEvent>();
     send_sync::<DisconnectedEvent>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProxyConfig, TransportKind, Url, configured_tls};
+
+    fn ep(kind: TransportKind, url: &str) -> (TransportKind, Url) {
+        (kind, Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn configured_tls_covers_endpoints_emulation_and_proxy() {
+        let ws = ep(TransportKind::WebSocket, "ws://h/connection/websocket");
+        let wss = ep(TransportKind::WebSocket, "wss://h/connection/websocket");
+        let http = ep(TransportKind::HttpStream, "http://h/connection/http-stream");
+        let https = ep(
+            TransportKind::HttpStream,
+            "https://h/connection/http-stream",
+        );
+        let tls_emu = Url::parse("https://h/emulation").unwrap();
+        let plain_emu = Url::parse("http://h/emulation").unwrap();
+        let none = ProxyConfig::None;
+        let tls_proxy = ProxyConfig::http(Url::parse("https://proxy:3128").unwrap(), None);
+        let plain_proxy = ProxyConfig::http(Url::parse("http://proxy:3128").unwrap(), None);
+
+        assert!(!configured_tls(std::slice::from_ref(&ws), None, &none));
+        assert!(configured_tls(&[wss], None, &none));
+        assert!(configured_tls(&[https], None, &none));
+        assert!(!configured_tls(
+            std::slice::from_ref(&http),
+            Some(&plain_emu),
+            &none
+        ));
+        // A plain stream endpoint with an HTTPS emulation endpoint still uses TLS.
+        assert!(configured_tls(
+            std::slice::from_ref(&http),
+            Some(&tls_emu),
+            &none
+        ));
+        assert!(configured_tls(&[ws.clone(), http], Some(&tls_emu), &none));
+        // Without HTTP-streaming, the emulation endpoint is never used.
+        assert!(!configured_tls(
+            std::slice::from_ref(&ws),
+            Some(&tls_emu),
+            &none
+        ));
+        // An explicit HTTPS proxy is TLS even for ws:// endpoints.
+        assert!(configured_tls(std::slice::from_ref(&ws), None, &tls_proxy));
+        assert!(!configured_tls(
+            std::slice::from_ref(&ws),
+            None,
+            &plain_proxy
+        ));
+        // Proxies only known per attempt are checked at connect time instead.
+        assert!(!configured_tls(&[ws], None, &ProxyConfig::System));
+    }
 }
