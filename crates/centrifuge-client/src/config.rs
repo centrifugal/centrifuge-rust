@@ -273,7 +273,8 @@ impl TlsConfig {
         Self::default()
     }
 
-    /// Also trusts the certificates in a PEM bundle (e.g. a corporate CA).
+    /// Also trusts the certificates in a PEM bundle (e.g. a corporate CA). Not
+    /// on Android, where building the client then fails (docs/spec.md §5.2).
     ///
     /// # Errors
     ///

@@ -2,6 +2,12 @@
 
 Release notes are on the [releases page](https://github.com/centrifugal/centrifuge-rust/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- `centrifuge-client` builds for Android. The platform verifier there takes no extra roots, so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` on Android instead of dropping them (docs/spec.md §5.2). Android and iOS are now built in CI.
+
 ## [0.1.0]
 
 The first usable release: phase 1 of [`docs/spec.md`](docs/spec.md).
