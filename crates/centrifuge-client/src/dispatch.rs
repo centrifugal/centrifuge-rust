@@ -195,6 +195,7 @@ fn offer<T>(tx: &mpsc::Sender<(T, oneshot::Sender<()>)>, item: T) -> Offer<T> {
 /// Delivers one batch of core events. Synchronous: called on the dispatcher
 /// thread, or on the driver task in inline mode (where streams use
 /// [`deliver_async`]).
+#[derive(Clone)]
 pub(crate) struct Delivery {
     pub(crate) client: Weak<ClientInner>,
     pub(crate) shared: Arc<Shared>,
@@ -552,8 +553,10 @@ pub(crate) struct Batch {
 pub(crate) enum Dispatcher {
     Thread {
         tx: std::sync::mpsc::Sender<Batch>,
-        /// The thread is gone and that was logged (docs/spec.md §9.4).
+        /// The thread is gone: that was reported once, and events are now
+        /// delivered inline with `fallback` (docs/spec.md §9.4).
         gone: AtomicBool,
+        fallback: Delivery,
     },
     Inline(Delivery),
 }
@@ -578,12 +581,25 @@ fn start_event_thread(spawn: Spawn, f: Box<dyn FnOnce() + Send>) -> Result<(), c
     })
 }
 
+/// Why the batch in which the event thread stopped doesn't count as delivered.
+const THREAD_GONE: &str =
+    "the event thread is gone (an SDK bug); later events are delivered on the client's task";
+
 /// The event thread stopped taking events. Handler panics are caught, so only
-/// an SDK bug gets here; events can't be delivered any more. Logged once.
-fn thread_gone(gone: &AtomicBool) {
-    if !gone.swap(true, Ordering::Relaxed) {
-        tracing::error!(target: "centrifuge", "the event thread is gone; events are being dropped");
+/// an SDK bug gets here. Marks it gone and logs; true only the first time.
+fn thread_gone(gone: &AtomicBool) -> bool {
+    let first = !gone.swap(true, Ordering::Relaxed);
+    if first {
+        tracing::error!(target: "centrifuge", "{THREAD_GONE}");
     }
+    first
+}
+
+/// One event on the calling task (inline mode, or after the thread is gone).
+fn run_inline(d: &Delivery, ev: Event) -> (BatchResult, Pending) {
+    let mut waits = Vec::new();
+    let r = d.run(vec![ev], &mut waits, false);
+    (r, waits)
 }
 
 impl Dispatcher {
@@ -609,6 +625,7 @@ impl Dispatcher {
             EventDelivery::Inline => Self::Inline(delivery),
             EventDelivery::Thread => {
                 let (tx, rx) = std::sync::mpsc::channel::<Batch>();
+                let fallback = delivery.clone();
                 start_event_thread(
                     spawn,
                     Box::new(move || {
@@ -623,6 +640,7 @@ impl Dispatcher {
                 Self::Thread {
                     tx,
                     gone: AtomicBool::new(false),
+                    fallback,
                 }
             }
         })
@@ -641,29 +659,42 @@ impl Dispatcher {
         let mut res = BatchResult::default();
         for ev in events {
             let (r, waits) = match self {
-                Self::Thread { tx, gone } => {
+                Self::Thread { gone, fallback, .. } if gone.load(Ordering::Relaxed) => {
+                    run_inline(fallback, ev)
+                }
+                Self::Thread { tx, gone, fallback } => {
                     let (done, rx) = oneshot::channel();
-                    if tx
-                        .send(Batch {
-                            events: vec![ev],
-                            done,
-                        })
-                        .is_err()
-                    {
-                        thread_gone(gone);
-                        return res;
+                    match tx.send(Batch {
+                        events: vec![ev],
+                        done,
+                    }) {
+                        Ok(()) => {
+                            if let Ok(r) = rx.await {
+                                r
+                            } else {
+                                // The thread stopped while handling this event,
+                                // so it may have been half delivered: like a
+                                // handler panic, the batch doesn't count as
+                                // delivered and the client stops loudly. No
+                                // second delivery, which could duplicate it.
+                                if thread_gone(gone) {
+                                    res.panic.get_or_insert_with(|| THREAD_GONE.into());
+                                }
+                                (BatchResult::default(), Vec::new())
+                            }
+                        }
+                        // The event never reached the thread: deliver it here.
+                        Err(std::sync::mpsc::SendError(batch)) => {
+                            if thread_gone(gone) {
+                                res.panic.get_or_insert_with(|| THREAD_GONE.into());
+                            }
+                            let mut waits = Vec::new();
+                            let r = fallback.run(batch.events, &mut waits, false);
+                            (r, waits)
+                        }
                     }
-                    let Ok(r) = rx.await else {
-                        thread_gone(gone);
-                        return res;
-                    };
-                    r
                 }
-                Self::Inline(d) => {
-                    let mut waits = Vec::new();
-                    let r = d.run(vec![ev], &mut waits, false);
-                    (r, waits)
-                }
+                Self::Inline(d) => run_inline(d, ev),
             };
             if res.panic.is_none() {
                 res.panic = r.panic;
@@ -687,7 +718,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, mpsc};
 
-    use super::{os_spawn, start_event_thread, thread_gone};
+    use super::{
+        Delivery, Dispatcher, Event, EventDelivery, THREAD_GONE, os_spawn, start_event_thread,
+        thread_gone, watch,
+    };
 
     #[test]
     fn a_failed_spawn_is_a_configuration_error() {
@@ -724,9 +758,92 @@ mod tests {
     #[test]
     fn a_gone_thread_is_reported_once() {
         let gone = AtomicBool::new(false);
-        thread_gone(&gone);
+        assert!(thread_gone(&gone), "the first call reports");
+        assert!(!thread_gone(&gone), "later calls don't");
         assert!(gone.load(Ordering::Relaxed));
-        thread_gone(&gone); // no second log; nothing to observe but no panic
-        assert!(gone.load(Ordering::Relaxed));
+    }
+
+    fn delivery() -> Delivery {
+        let net = crate::transport::net::Net::new(
+            crate::ProxyConfig::None,
+            &crate::TlsConfig::new(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let shared = crate::shared::Shared::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+            crate::shared::CallConfig {
+                protocol: centrifuge_client_core::codec::Protocol::Json,
+                timeout: std::time::Duration::from_secs(1),
+            },
+            http::HeaderMap::new(),
+            Arc::new(net),
+        );
+        Delivery {
+            client: std::sync::Weak::new(),
+            shared: Arc::new(shared),
+        }
+    }
+
+    fn error_event() -> Event {
+        Event::Error {
+            kind: centrifuge_client_core::machine::ClientErrorKind::Connect,
+            message: "test".into(),
+            source: None,
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn build_fails_when_the_thread_cant_start() {
+        fn failing(_: std::thread::Builder, _: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no threads",
+            ))
+        }
+        let rt = runtime();
+        let r = Dispatcher::with_spawn(
+            EventDelivery::Thread,
+            delivery(),
+            rt.handle().clone(),
+            failing,
+        );
+        assert!(matches!(r, Err(crate::Error::Configuration(_))));
+        // Inline never spawns.
+        let r = Dispatcher::with_spawn(
+            EventDelivery::Inline,
+            delivery(),
+            rt.handle().clone(),
+            failing,
+        );
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn a_dead_thread_fails_the_batch_once_then_delivers_inline() {
+        // "Starts" the thread but drops it: as if it had died at once.
+        #[allow(clippy::unnecessary_wraps)] // must match `Spawn`
+        fn dead(_: std::thread::Builder, _: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            Ok(())
+        }
+        let rt = runtime();
+        let d =
+            Dispatcher::with_spawn(EventDelivery::Thread, delivery(), rt.handle().clone(), dead)
+                .unwrap();
+        let (_tx, mut stop) = watch::channel(false);
+        // The first batch doesn't count as delivered, so the core stops the
+        // client loudly and commits nothing.
+        let first = rt.block_on(d.deliver(vec![error_event(), error_event()], &mut stop));
+        assert_eq!(first.panic.as_deref(), Some(THREAD_GONE));
+        // Later batches (the error and disconnect the core emits for it) are
+        // delivered inline, so they reach the app and nothing loops.
+        let later = rt.block_on(d.deliver(vec![error_event()], &mut stop));
+        assert_eq!(later.panic, None);
     }
 }
