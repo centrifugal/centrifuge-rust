@@ -227,6 +227,81 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+  # Build only: the platform verifier's API differs on mobile (docs/spec.md §5.2).
+  # cargo-ndk points aws-lc-rs's C build at the runner's NDK (ANDROID_NDK_HOME).
+  # Three feature sets: with --all-features aws-lc-rs wins over ring, so ring
+  # needs its own run, and the default set is what most apps build.
+  android:
+    name: builds for Android (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all features
+            features: --all-features
+            # Every ABI an app usually ships: phones, older 32-bit phones,
+            # emulators.
+            abis: -t arm64-v8a -t armeabi-v7a -t x86_64
+          - name: default features
+            features: ""
+            abis: -t arm64-v8a
+          - name: ring
+            features: --no-default-features --features ring,json,http-stream,system-proxy,delta,serde
+            abis: -t arm64-v8a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-ndk@4.1.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Word splitting of ABIS and FEATURES is intended.
+      - run: cargo ndk $ABIS check -p centrifuge-client $FEATURES --locked
+        env:
+          ABIS: ${{ matrix.abis }}
+          FEATURES: ${{ matrix.features }}
+          RUSTFLAGS: -D warnings
+
+  ios:
+    name: builds for iOS (${{ matrix.name }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all features
+            features: --all-features
+          - name: default features
+            features: ""
+          - name: ring
+            features: --no-default-features --features ring,json,http-stream,system-proxy,delta,serde
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Word splitting of FEATURES is intended.
+      - run: cargo check -p centrifuge-client --target aarch64-apple-ios $FEATURES --locked
+        env:
+          FEATURES: ${{ matrix.features }}
+          RUSTFLAGS: -D warnings
+
   deny:
     name: cargo-deny (${{ matrix.checks }})
     runs-on: ubuntu-latest
@@ -270,7 +345,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, deny, typos, zizmor]
+    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, android, ios, deny, typos, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

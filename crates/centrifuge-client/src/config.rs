@@ -56,7 +56,8 @@ impl TransportEndpoint {
 pub enum EventDelivery {
     /// A dedicated thread per client (the default). A handler that blocks stalls
     /// only this client's events, never the async runtime, and blocking on a
-    /// call from a handler works.
+    /// call from a handler works. If the thread can't be started,
+    /// [`ClientBuilder::build`](crate::ClientBuilder::build) fails.
     #[default]
     Thread,
     /// On the client's own task: no extra thread, for tools running thousands
@@ -273,7 +274,13 @@ impl TlsConfig {
         Self::default()
     }
 
-    /// Also trusts the certificates in a PEM bundle (e.g. a corporate CA).
+    /// Also trusts the certificates in a PEM bundle (e.g. a corporate CA). Not
+    /// on Android, where building the client then fails (docs/spec.md §5.2).
+    ///
+    /// The roots go to the OS verifier, so they have no effect together with
+    /// [`danger_accept_invalid_certs`](Self::danger_accept_invalid_certs)
+    /// (nothing is verified) or on a config from `rustls_client_config`
+    /// (feature `rustls-config`; put the roots in that `rustls::ClientConfig`).
     ///
     /// # Errors
     ///
@@ -302,8 +309,24 @@ impl TlsConfig {
         self
     }
 
+    /// Whether certificates are checked by rustls-platform-verifier (the OS
+    /// trust store): not with a custom rustls config or with
+    /// `danger_accept_invalid_certs`.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn uses_platform_verifier(&self) -> bool {
+        #[cfg(feature = "rustls-config")]
+        if self.custom.is_some() {
+            return false;
+        }
+        !self.accept_invalid
+    }
+
     /// Uses a fully custom rustls configuration. Exempt from semver guarantees,
     /// because rustls is pre-1.0.
+    ///
+    /// It replaces the OS verifier: roots from [`add_root_pem`](Self::add_root_pem)
+    /// are ignored, and on Android no `centrifuge::android::init_*` call is
+    /// needed.
     #[cfg(feature = "rustls-config")]
     #[must_use]
     pub fn rustls_client_config(cfg: rustls::ClientConfig) -> Self {
