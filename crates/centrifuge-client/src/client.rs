@@ -925,6 +925,15 @@ impl ClientBuilder {
             None => None,
         };
         let net = Arc::new(Net::new(self.proxy, &self.tls, self.handshake_timeout)?);
+        // A TLS endpoint can't work without the verifier's setup, so say so
+        // here instead of retrying forever (docs/spec.md §5.2).
+        #[cfg(target_os = "android")]
+        if endpoints
+            .iter()
+            .any(|(_, u)| matches!(u.scheme(), "wss" | "https"))
+        {
+            net.android_tls_ready().map_err(Error::Configuration)?;
+        }
 
         let core = Core::new(CoreConfig {
             protocol: self.protocol,

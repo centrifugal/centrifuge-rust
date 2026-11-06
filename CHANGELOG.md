@@ -6,7 +6,7 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ### Added
 
-- `centrifuge::android` (Android only): `init_with_env`, `init_with_refs` and `init_with_runtime` set up the TLS platform verifier through the client's own copy of rustls-platform-verifier, so the app can't initialise a different version by mistake. Without the setup, TLS connections now fail with an error naming it, instead of a panic inside the verifier. Exempt from semver: the signatures use `jni` types, re-exported as `centrifuge::android::jni` (docs/spec.md §5.2).
+- `centrifuge::android` (Android only): `init_with_env`, `init_with_refs` and `init_with_runtime` set up the TLS platform verifier through the client's own copy of rustls-platform-verifier, so the app can't initialise a different version by mistake. Without the setup, `build()` fails with `Error::Configuration` when an endpoint uses TLS, instead of the verifier panicking on the first connection. Exempt from semver: the signatures use `jni` types, re-exported as `centrifuge::android::jni` (docs/spec.md §5.2).
 
 ### Fixed
 

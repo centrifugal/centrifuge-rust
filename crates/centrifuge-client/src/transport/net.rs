@@ -241,6 +241,13 @@ impl Net {
         })
     }
 
+    /// Whether TLS can be used now: on Android the platform verifier needs
+    /// `centrifuge::android::init_*` first.
+    #[cfg(target_os = "android")]
+    pub(crate) fn android_tls_ready(&self) -> Result<(), String> {
+        android_rules::verifier_ready(self.platform_verifier, crate::android::initialized())
+    }
+
     /// The rustls config, and whether it uses the platform verifier.
     fn tls_config(tls: &TlsConfig) -> Result<(Arc<rustls::ClientConfig>, bool), crate::Error> {
         #[cfg(feature = "rustls-config")]
@@ -407,9 +414,10 @@ impl Net {
         if self.accept_invalid {
             tracing::warn!(target: "centrifuge", "TLS certificate verification is disabled (danger_accept_invalid_certs)");
         }
+        // build() already refuses TLS endpoints before the setup; this covers
+        // an HTTPS proxy, which can come from the environment or OS settings.
         #[cfg(target_os = "android")]
-        android_rules::verifier_ready(self.platform_verifier, crate::android::initialized())
-            .map_err(NetError::new)?;
+        self.android_tls_ready().map_err(NetError::new)?;
         let mut cfg = (*self.tls).clone();
         cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         let name = rustls::pki_types::ServerName::try_from(host.to_owned())

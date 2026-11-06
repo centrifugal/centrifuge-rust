@@ -1,26 +1,36 @@
 //! Android setup for TLS certificate verification (docs/spec.md §5.2).
 //!
 //! On Android the OS checks server certificates through JNI, so the verifier
-//! needs the JVM and an app `Context` before the first TLS connection. Call one
-//! of the `init_*` functions once, before connecting to a `wss://` or
-//! `https://` endpoint or through an HTTPS proxy. A good place is the native
-//! init your app already has, such as `JNI_OnLoad` or the first call from
-//! Kotlin.
+//! needs the JVM and an app `Context`. Call one of the `init_*` functions once,
+//! **before [`ClientBuilder::build`](crate::ClientBuilder::build)**. A good
+//! place is the native init your app already has, such as `JNI_OnLoad` or the
+//! first call from Kotlin.
 //!
+//! - The setup is **process-wide**: the verifier keeps one Android runtime per
+//!   process, so one call covers every client in the process.
 //! - The call reaches the exact `rustls-platform-verifier` this crate links,
 //!   so the app has no second copy of the verifier to keep in sync.
 //! - A repeated call does nothing. So does a call after something else in the
 //!   app has already set up the same verifier.
-//! - Until a call has succeeded, TLS connections fail with an error that names
-//!   this module (reported like any other connection error), instead of the
-//!   verifier panicking on the first certificate check.
+//! - Without it, `build()` fails with [`Error::Configuration`](crate::Error::Configuration)
+//!   if any endpoint is `wss://` or `https://`. A TLS connection that only
+//!   becomes TLS later (an HTTPS proxy from the environment or OS settings)
+//!   fails that attempt with an error naming this module and is retried with
+//!   backoff, so a setup call that lands after `build()` (on another thread,
+//!   say) takes effect on the next attempt. The verifier never panics on its
+//!   first certificate check.
 //! - Not needed with [`TlsConfig::danger_accept_invalid_certs`] or a custom
 //!   `rustls::ClientConfig` (feature `rustls-config`), which don't use the
 //!   platform verifier.
 //!
 //! The app also needs the verifier's Kotlin component in its Gradle build,
-//! kept by Proguard: see the
-//! [rustls-platform-verifier Android section](https://github.com/rustls/rustls-platform-verifier#android).
+//! kept by Proguard. **Its version must be identical to the
+//! `rustls-platform-verifier-android` crate in your `Cargo.lock`** (0.2.0 with
+//! this release), or the app can crash at runtime although everything
+//! compiles. The Gradle snippet in the
+//! [rustls-platform-verifier Android section](https://github.com/rustls/rustls-platform-verifier#android)
+//! reads that version from `Cargo.lock`, so it stays in sync on its own;
+//! a version typed into Gradle by hand doesn't.
 //!
 //! **Exempt from semver guarantees.** The signatures use types from `jni` and
 //! `rustls-platform-verifier`, both pre-1.0, and they follow those crates. The

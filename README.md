@@ -197,7 +197,7 @@ use tauri::{Emitter as _, Manager as _};
 
 - **Protocol:** the Centrifugo client protocol v2 (Centrifugo v4 and newer). HTTP-streaming needs Centrifugo v5 or newer with `http_stream` enabled. Tested against Centrifugo v6.10.
 - **Runtime:** Tokio (multi-thread or current-thread).
-- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before the first TLS connection, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §5.2](docs/spec.md)). A browser (wasm) build is planned: the core already builds for `wasm32-unknown-unknown`.
+- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §5.2](docs/spec.md)). A browser (wasm) build is planned: the core already builds for `wasm32-unknown-unknown`.
 - **MSRV:** Rust 1.85. Raising it is a minor-version change, noted in the [changelog](CHANGELOG.md).
 
 ## Differences from centrifuge-js
