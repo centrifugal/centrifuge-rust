@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use centrifuge_client_core::machine::Event;
@@ -549,36 +550,82 @@ pub(crate) struct Batch {
 
 /// Where batches go.
 pub(crate) enum Dispatcher {
-    Thread(std::sync::mpsc::Sender<Batch>),
+    Thread {
+        tx: std::sync::mpsc::Sender<Batch>,
+        /// The thread is gone and that was logged (docs/spec.md §9.4).
+        gone: AtomicBool,
+    },
     Inline(Delivery),
 }
 
+/// Starts a thread; a parameter so tests can make it fail.
+type Spawn = fn(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+fn os_spawn(b: std::thread::Builder, f: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    b.spawn(f).map(drop)
+}
+
+/// Starts the `centrifuge-events` thread. Without it no event would ever be
+/// delivered, so a failure is an error for `build()`, not a log line. On
+/// targets without threads (wasm32-unknown-unknown) spawning always fails.
+fn start_event_thread(spawn: Spawn, f: Box<dyn FnOnce() + Send>) -> Result<(), crate::Error> {
+    let builder = std::thread::Builder::new().name("centrifuge-events".into());
+    spawn(builder, f).map_err(|e| {
+        crate::Error::Configuration(format!(
+            "can't start the event thread for EventDelivery::Thread: {e}; \
+             use EventDelivery::Inline where threads aren't available"
+        ))
+    })
+}
+
+/// The event thread stopped taking events. Handler panics are caught, so only
+/// an SDK bug gets here; events can't be delivered any more. Logged once.
+fn thread_gone(gone: &AtomicBool) {
+    if !gone.swap(true, Ordering::Relaxed) {
+        tracing::error!(target: "centrifuge", "the event thread is gone; events are being dropped");
+    }
+}
+
 impl Dispatcher {
+    /// # Errors
+    ///
+    /// [`Error::Configuration`](crate::Error::Configuration) if the event
+    /// thread can't be started.
     pub(crate) fn new(
         mode: EventDelivery,
         delivery: Delivery,
         runtime: tokio::runtime::Handle,
-    ) -> Self {
-        match mode {
+    ) -> Result<Self, crate::Error> {
+        Self::with_spawn(mode, delivery, runtime, os_spawn)
+    }
+
+    fn with_spawn(
+        mode: EventDelivery,
+        delivery: Delivery,
+        runtime: tokio::runtime::Handle,
+        spawn: Spawn,
+    ) -> Result<Self, crate::Error> {
+        Ok(match mode {
             EventDelivery::Inline => Self::Inline(delivery),
             EventDelivery::Thread => {
                 let (tx, rx) = std::sync::mpsc::channel::<Batch>();
-                let spawned = std::thread::Builder::new()
-                    .name("centrifuge-events".into())
-                    .spawn(move || {
+                start_event_thread(
+                    spawn,
+                    Box::new(move || {
                         let _rt = runtime.enter();
                         while let Ok(batch) = rx.recv() {
                             let mut waits = Vec::new();
                             let res = delivery.run(batch.events, &mut waits, false);
                             let _ = batch.done.send((res, waits));
                         }
-                    });
-                if let Err(e) = spawned {
-                    tracing::error!(target: "centrifuge", "can't spawn the event thread: {e}");
+                    }),
+                )?;
+                Self::Thread {
+                    tx,
+                    gone: AtomicBool::new(false),
                 }
-                Self::Thread(tx)
             }
-        }
+        })
     }
 
     /// Delivers a step's events and waits for them, without blocking the
@@ -594,7 +641,7 @@ impl Dispatcher {
         let mut res = BatchResult::default();
         for ev in events {
             let (r, waits) = match self {
-                Self::Thread(tx) => {
+                Self::Thread { tx, gone } => {
                     let (done, rx) = oneshot::channel();
                     if tx
                         .send(Batch {
@@ -603,9 +650,14 @@ impl Dispatcher {
                         })
                         .is_err()
                     {
+                        thread_gone(gone);
                         return res;
                     }
-                    rx.await.unwrap_or_default()
+                    let Ok(r) = rx.await else {
+                        thread_gone(gone);
+                        return res;
+                    };
+                    r
                 }
                 Self::Inline(d) => {
                     let mut waits = Vec::new();
@@ -627,5 +679,54 @@ impl Dispatcher {
             }
         }
         res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+
+    use super::{os_spawn, start_event_thread, thread_gone};
+
+    #[test]
+    fn a_failed_spawn_is_a_configuration_error() {
+        fn failing(_: std::thread::Builder, _: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no threads",
+            ))
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = ran.clone();
+        let err = start_event_thread(failing, Box::new(move || r.store(true, Ordering::SeqCst)))
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Configuration(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("no threads"), "{msg}");
+        assert!(msg.contains("EventDelivery::Inline"), "{msg}");
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_event_thread_starts_and_is_named() {
+        let (tx, rx) = mpsc::channel();
+        start_event_thread(
+            os_spawn,
+            Box::new(move || {
+                let _ = tx.send(std::thread::current().name().map(str::to_owned));
+            }),
+        )
+        .unwrap();
+        assert_eq!(rx.recv().unwrap().as_deref(), Some("centrifuge-events"));
+    }
+
+    #[test]
+    fn a_gone_thread_is_reported_once() {
+        let gone = AtomicBool::new(false);
+        thread_gone(&gone);
+        assert!(gone.load(Ordering::Relaxed));
+        thread_gone(&gone); // no second log; nothing to observe but no panic
+        assert!(gone.load(Ordering::Relaxed));
     }
 }

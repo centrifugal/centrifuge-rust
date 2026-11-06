@@ -56,7 +56,8 @@ impl TransportEndpoint {
 pub enum EventDelivery {
     /// A dedicated thread per client (the default). A handler that blocks stalls
     /// only this client's events, never the async runtime, and blocking on a
-    /// call from a handler works.
+    /// call from a handler works. If the thread can't be started,
+    /// [`ClientBuilder::build`](crate::ClientBuilder::build) fails.
     #[default]
     Thread,
     /// On the client's own task: no extra thread, for tools running thousands

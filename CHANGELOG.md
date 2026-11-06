@@ -10,6 +10,7 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ### Fixed
 
+- `build()` fails with `Error::Configuration` when the `EventDelivery::Thread` event thread can't be started. Before, the client ran but silently delivered no events at all. If the event thread ever stops later, that's now logged once at `error` instead of events disappearing without a trace (docs/spec.md §9.4).
 - `centrifuge-client` builds for Android. The platform verifier there takes no extra roots, so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` on Android instead of dropping them (docs/spec.md §5.2). Android and iOS are now built in CI.
 
 ## [0.1.0]
