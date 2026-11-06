@@ -12,11 +12,17 @@
 //!   so the app has no second copy of the verifier to keep in sync.
 //! - A repeated call does nothing. So does a call after something else in the
 //!   app has already set up the same verifier.
+//! - **Call it even if the app already sets up `rustls-platform-verifier`
+//!   another way** (directly, or through another library). This crate can't
+//!   see that setup, only its own calls, and the call is then a no-op that
+//!   makes no JNI calls.
 //! - Without it, `build()` fails with [`Error::Configuration`](crate::Error::Configuration)
-//!   if any endpoint is `wss://` or `https://`, or HTTP-streaming is
-//!   configured with an `https://` `emulation_endpoint`. A TLS connection that only
-//!   becomes TLS later (an HTTPS proxy from the environment or OS settings)
-//!   fails that attempt with an error naming this module and is retried with
+//!   if a connection known at build time uses TLS: a `wss://` or `https://`
+//!   endpoint, an `https://` `emulation_endpoint` with HTTP-streaming, or an
+//!   explicit `https://` proxy. A connection that only turns out to use TLS
+//!   when it is attempted (an HTTPS proxy from the environment, the OS, a
+//!   custom proxy function or `set_proxy`) fails that attempt before any
+//!   network I/O, with an error naming this module, and is retried with
 //!   backoff, so a setup call that lands after `build()` (on another thread,
 //!   say) takes effect on the next attempt. The verifier never panics on its
 //!   first certificate check.
@@ -37,16 +43,38 @@
 //! `rustls-platform-verifier`, both pre-1.0, and they follow those crates. The
 //! `jni` crate is re-exported as [`jni`] so the app names the same types.
 //!
+//! A native method called from Kotlin, e.g.
+//! `external fun nativeInit(context: Context): Boolean` in `com.example.App`:
+//!
 //! ```ignore
+//! use centrifuge::android::jni::errors::ThrowRuntimeExAndDefault;
+//! use centrifuge::android::jni::objects::{JClass, JObject};
+//! use centrifuge::android::jni::EnvUnowned;
+//!
 //! #[unsafe(no_mangle)]
-//! pub extern "system" fn Java_com_example_App_nativeInit<'local>(
-//!     mut env: centrifuge::android::jni::Env<'local>,
-//!     _class: centrifuge::android::jni::objects::JClass<'local>,
-//!     context: centrifuge::android::jni::objects::JObject<'local>,
-//! ) {
-//!     centrifuge::android::init_with_env(&mut env, context).expect("TLS setup");
+//! pub extern "system" fn Java_com_example_App_nativeInit<'caller>(
+//!     mut unowned_env: EnvUnowned<'caller>,
+//!     _class: JClass<'caller>,
+//!     context: JObject<'caller>,
+//! ) -> bool {
+//!     // `with_env` turns the JVM's raw env into an `Env` and catches panics,
+//!     // so nothing unwinds into the JVM. A failed setup returns `false` to
+//!     // Kotlin instead of aborting the app.
+//!     unowned_env
+//!         .with_env(|env| -> centrifuge::android::jni::errors::Result<bool> {
+//!             Ok(match centrifuge::android::init_with_env(env, context) {
+//!                 Ok(()) => true,
+//!                 Err(e) => {
+//!                     log::error!("{e}");
+//!                     false
+//!                 }
+//!             })
+//!         })
+//!         .resolve::<ThrowRuntimeExAndDefault>()
 //! }
 //! ```
+//!
+//! Take the env as `EnvUnowned`, never as `Env`: `Env` isn't FFI-safe.
 //!
 //! [`TlsConfig::danger_accept_invalid_certs`]: crate::TlsConfig::danger_accept_invalid_certs
 
@@ -65,10 +93,18 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// # Errors
 ///
 /// [`Error::Configuration`](crate::Error::Configuration) if a JNI call fails
-/// (for example, `context` isn't a `Context`).
+/// (for example, `context` isn't a `Context`). A Java exception that call
+/// raised is cleared, since the error already reports it, so `env` stays
+/// usable.
 pub fn init_with_env(env: &mut jni::Env<'_>, context: JObject<'_>) -> Result<(), crate::Error> {
-    rustls_platform_verifier::android::init_with_env(env, context)
-        .map_err(|e| crate::Error::Configuration(format!("Android TLS setup: {e}")))?;
+    if let Err(e) = rustls_platform_verifier::android::init_with_env(env, context) {
+        if env.exception_check() {
+            env.exception_clear();
+        }
+        return Err(crate::Error::Configuration(format!(
+            "Android TLS setup: {e}"
+        )));
+    }
     INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }

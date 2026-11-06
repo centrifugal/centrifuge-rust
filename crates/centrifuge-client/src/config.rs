@@ -308,6 +308,18 @@ impl TlsConfig {
         self
     }
 
+    /// Whether certificates are checked by rustls-platform-verifier (the OS
+    /// trust store): not with a custom rustls config or with
+    /// `danger_accept_invalid_certs`.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn uses_platform_verifier(&self) -> bool {
+        #[cfg(feature = "rustls-config")]
+        if self.custom.is_some() {
+            return false;
+        }
+        !self.accept_invalid
+    }
+
     /// Uses a fully custom rustls configuration. Exempt from semver guarantees,
     /// because rustls is pre-1.0.
     ///

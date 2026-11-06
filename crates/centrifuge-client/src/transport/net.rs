@@ -55,8 +55,8 @@ pub(crate) struct Net {
     pub(crate) proxy: Mutex<ProxyConfig>,
     tls: Arc<rustls::ClientConfig>,
     /// `tls` checks certificates with rustls-platform-verifier, which needs
-    /// `centrifuge::android::init_*` on Android.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// `centrifuge::android::init_*` first.
+    #[cfg(target_os = "android")]
     platform_verifier: bool,
     accept_invalid: bool,
     /// At most one DNS lookup in flight per client: a dropped future doesn't
@@ -186,6 +186,11 @@ fn platform_verifier(
     }
 }
 
+/// Whether connecting to `url` (an endpoint or an HTTP proxy) uses TLS.
+pub(crate) fn uses_tls(url: &Url) -> bool {
+    matches!(url.scheme(), "wss" | "https")
+}
+
 fn tls_error(e: &rustls::Error) -> crate::Error {
     crate::Error::Configuration(format!("TLS: {e}"))
 }
@@ -207,6 +212,11 @@ mod android_rules {
         ))
     }
 
+    pub(super) const NOT_INITIALIZED: &str = "TLS on Android needs setup first: call \
+        centrifuge::android::init_with_env (or init_with_refs, init_with_runtime) before \
+        build(), also if the app already set up rustls-platform-verifier another way \
+        (the call is then a no-op)";
+
     /// Without `centrifuge::android::init_*`, the verifier panics on its first
     /// certificate check. Fail the connection attempt with a clear error instead.
     pub(super) fn verifier_ready(
@@ -216,11 +226,7 @@ mod android_rules {
         if !uses_platform_verifier || initialized {
             return Ok(());
         }
-        Err(
-            "TLS on Android needs setup first: call centrifuge::android::init_with_env \
-             (or init_with_refs, init_with_runtime) before connecting"
-                .into(),
-        )
+        Err(NOT_INITIALIZED.into())
     }
 }
 
@@ -230,11 +236,12 @@ impl Net {
         tls: &TlsConfig,
         handshake_timeout: std::time::Duration,
     ) -> Result<Self, crate::Error> {
-        let (cfg, platform_verifier) = Self::tls_config(tls)?;
+        let cfg = Self::tls_config(tls)?;
         Ok(Self {
             proxy: Mutex::new(proxy),
             tls: cfg,
-            platform_verifier,
+            #[cfg(target_os = "android")]
+            platform_verifier: tls.uses_platform_verifier(),
             accept_invalid: tls.accept_invalid,
             lookup: Mutex::new(None),
             handshake_timeout,
@@ -248,11 +255,10 @@ impl Net {
         android_rules::verifier_ready(self.platform_verifier, crate::android::initialized())
     }
 
-    /// The rustls config, and whether it uses the platform verifier.
-    fn tls_config(tls: &TlsConfig) -> Result<(Arc<rustls::ClientConfig>, bool), crate::Error> {
+    fn tls_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, crate::Error> {
         #[cfg(feature = "rustls-config")]
         if let Some(c) = &tls.custom {
-            return Ok((c.clone(), false));
+            return Ok(c.clone());
         }
         let provider = provider();
         let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -270,7 +276,7 @@ impl Net {
                 .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_no_client_auth()
         };
-        Ok((Arc::new(cfg), !tls.accept_invalid))
+        Ok(Arc::new(cfg))
     }
 
     /// The proxy decision for `url` (re-read on every attempt: the OS settings
@@ -414,10 +420,6 @@ impl Net {
         if self.accept_invalid {
             tracing::warn!(target: "centrifuge", "TLS certificate verification is disabled (danger_accept_invalid_certs)");
         }
-        // build() already refuses TLS endpoints before the setup; this covers
-        // an HTTPS proxy, which can come from the environment or OS settings.
-        #[cfg(target_os = "android")]
-        self.android_tls_ready().map_err(NetError::new)?;
         let mut cfg = (*self.tls).clone();
         cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         let name = rustls::pki_types::ServerName::try_from(host.to_owned())
@@ -433,17 +435,25 @@ impl Net {
     /// with TLS for `wss`/`https`.
     pub(crate) async fn connect(&self, url: &Url, alpn: &[&[u8]]) -> Result<BoxIo, NetError> {
         let host = host_of(url)?;
-        let secure = matches!(url.scheme(), "wss" | "https");
+        let secure = uses_tls(url);
         let port = url
             .port_or_known_default()
             .unwrap_or(if secure { 443 } else { 80 });
-        let io: BoxIo = match self.route_for(url) {
+        let route = self.route_for(url);
+        // build() refuses TLS endpoints before the setup; this also covers an
+        // HTTPS proxy from the environment, the OS or `set_proxy`. Checked
+        // before any DNS or TCP, so a retry costs no network.
+        #[cfg(target_os = "android")]
+        if secure || matches!(&route, Route::Http { url: p, .. } if uses_tls(p)) {
+            self.android_tls_ready().map_err(NetError::new)?;
+        }
+        let io: BoxIo = match route {
             Route::Direct => Box::pin(self.tcp(&host, port).await?),
             Route::Http { url: purl, auth } => {
                 let phost = host_of(&purl).map_err(|_| NetError::new("proxy URL has no host"))?;
                 let pport = purl.port_or_known_default().unwrap_or(80);
                 let mut io: BoxIo = Box::pin(self.tcp(&phost, pport).await?);
-                if purl.scheme() == "https" {
+                if uses_tls(&purl) {
                     io = self.tls_wrap(io, &phost, &[]).await?;
                 }
                 http_connect(io, &host, port, auth.as_deref()).await?
@@ -700,11 +710,12 @@ mod tests {
 
     #[test]
     fn platform_verifier_flag() {
-        let (_, uses) = super::Net::tls_config(&crate::TlsConfig::new()).unwrap();
-        assert!(uses);
-        let (_, uses) =
-            super::Net::tls_config(&crate::TlsConfig::new().danger_accept_invalid_certs()).unwrap();
-        assert!(!uses);
+        assert!(crate::TlsConfig::new().uses_platform_verifier());
+        assert!(
+            !crate::TlsConfig::new()
+                .danger_accept_invalid_certs()
+                .uses_platform_verifier()
+        );
     }
 
     #[test]
