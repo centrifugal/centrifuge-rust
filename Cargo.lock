@@ -192,6 +192,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "jni",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",

@@ -54,6 +54,8 @@
 //! for the exact behaviour.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(target_os = "android")]
+pub mod android;
 mod calls;
 mod client;
 mod config;

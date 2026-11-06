@@ -54,6 +54,10 @@ type Lookup = Shared<BoxFuture<'static, Result<Vec<SocketAddr>, Arc<io::Error>>>
 pub(crate) struct Net {
     pub(crate) proxy: Mutex<ProxyConfig>,
     tls: Arc<rustls::ClientConfig>,
+    /// `tls` checks certificates with rustls-platform-verifier, which needs
+    /// `centrifuge::android::init_*` on Android.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    platform_verifier: bool,
     accept_invalid: bool,
     /// At most one DNS lookup in flight per client: a dropped future doesn't
     /// stop a blocking `getaddrinfo` (docs/spec.md §6.2).
@@ -172,11 +176,7 @@ fn platform_verifier(
 ) -> Result<rustls_platform_verifier::Verifier, crate::Error> {
     #[cfg(target_os = "android")]
     {
-        if !tls.extra_roots.is_empty() {
-            return Err(crate::Error::Configuration(
-                "TLS: extra roots aren't supported on Android; install the CA in the OS store or use TlsConfig::rustls_client_config".into(),
-            ));
-        }
+        android_rules::extra_roots(tls.extra_roots.len())?;
         rustls_platform_verifier::Verifier::new(provider).map_err(|e| tls_error(&e))
     }
     #[cfg(not(target_os = "android"))]
@@ -190,26 +190,62 @@ fn tls_error(e: &rustls::Error) -> crate::Error {
     crate::Error::Configuration(format!("TLS: {e}"))
 }
 
+/// Android's TLS rules (docs/spec.md §5.2). Plain functions, built on every
+/// target, so host tests cover them; only Android calls them.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod android_rules {
+    /// Android's verifier takes no extra roots: refuse them at `build()`.
+    pub(super) fn extra_roots(count: usize) -> Result<(), crate::Error> {
+        if count == 0 {
+            return Ok(());
+        }
+        Err(crate::Error::Configuration(
+            "TLS: extra roots aren't supported on Android; install the CA in the OS store, \
+             or pass your own rustls::ClientConfig with TlsConfig::rustls_client_config \
+             (feature `rustls-config`)"
+                .into(),
+        ))
+    }
+
+    /// Without `centrifuge::android::init_*`, the verifier panics on its first
+    /// certificate check. Fail the connection attempt with a clear error instead.
+    pub(super) fn verifier_ready(
+        uses_platform_verifier: bool,
+        initialized: bool,
+    ) -> Result<(), String> {
+        if !uses_platform_verifier || initialized {
+            return Ok(());
+        }
+        Err(
+            "TLS on Android needs setup first: call centrifuge::android::init_with_env \
+             (or init_with_refs, init_with_runtime) before connecting"
+                .into(),
+        )
+    }
+}
+
 impl Net {
     pub(crate) fn new(
         proxy: ProxyConfig,
         tls: &TlsConfig,
         handshake_timeout: std::time::Duration,
     ) -> Result<Self, crate::Error> {
-        let cfg = Self::tls_config(tls)?;
+        let (cfg, platform_verifier) = Self::tls_config(tls)?;
         Ok(Self {
             proxy: Mutex::new(proxy),
             tls: cfg,
+            platform_verifier,
             accept_invalid: tls.accept_invalid,
             lookup: Mutex::new(None),
             handshake_timeout,
         })
     }
 
-    fn tls_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, crate::Error> {
+    /// The rustls config, and whether it uses the platform verifier.
+    fn tls_config(tls: &TlsConfig) -> Result<(Arc<rustls::ClientConfig>, bool), crate::Error> {
         #[cfg(feature = "rustls-config")]
         if let Some(c) = &tls.custom {
-            return Ok(c.clone());
+            return Ok((c.clone(), false));
         }
         let provider = provider();
         let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -227,7 +263,7 @@ impl Net {
                 .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_no_client_auth()
         };
-        Ok(Arc::new(cfg))
+        Ok((Arc::new(cfg), !tls.accept_invalid))
     }
 
     /// The proxy decision for `url` (re-read on every attempt: the OS settings
@@ -371,6 +407,9 @@ impl Net {
         if self.accept_invalid {
             tracing::warn!(target: "centrifuge", "TLS certificate verification is disabled (danger_accept_invalid_certs)");
         }
+        #[cfg(target_os = "android")]
+        android_rules::verifier_ready(self.platform_verifier, crate::android::initialized())
+            .map_err(NetError::new)?;
         let mut cfg = (*self.tls).clone();
         cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         let name = rustls::pki_types::ServerName::try_from(host.to_owned())
@@ -630,6 +669,36 @@ async fn socks5_connect(
 
 #[cfg(test)]
 mod tests {
+    use super::android_rules;
+
+    #[test]
+    fn android_refuses_extra_roots() {
+        assert!(android_rules::extra_roots(0).is_ok());
+        let err = android_rules::extra_roots(1).unwrap_err().to_string();
+        assert!(
+            err.contains("extra roots aren't supported on Android"),
+            "{err}"
+        );
+        assert!(err.contains("feature `rustls-config`"), "{err}");
+    }
+
+    #[test]
+    fn android_needs_init_only_for_the_platform_verifier() {
+        assert!(android_rules::verifier_ready(true, true).is_ok());
+        assert!(android_rules::verifier_ready(false, false).is_ok());
+        let err = android_rules::verifier_ready(true, false).unwrap_err();
+        assert!(err.contains("centrifuge::android::init_with_env"), "{err}");
+    }
+
+    #[test]
+    fn platform_verifier_flag() {
+        let (_, uses) = super::Net::tls_config(&crate::TlsConfig::new()).unwrap();
+        assert!(uses);
+        let (_, uses) =
+            super::Net::tls_config(&crate::TlsConfig::new().danger_accept_invalid_certs()).unwrap();
+        assert!(!uses);
+    }
+
     #[test]
     fn base64_matches_rfc4648() {
         for (i, o) in [

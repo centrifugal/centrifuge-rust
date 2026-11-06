@@ -1,0 +1,86 @@
+//! Android setup for TLS certificate verification (docs/spec.md §5.2).
+//!
+//! On Android the OS checks server certificates through JNI, so the verifier
+//! needs the JVM and an app `Context` before the first TLS connection. Call one
+//! of the `init_*` functions once, before connecting to a `wss://` or
+//! `https://` endpoint or through an HTTPS proxy. A good place is the native
+//! init your app already has, such as `JNI_OnLoad` or the first call from
+//! Kotlin.
+//!
+//! - The call reaches the exact `rustls-platform-verifier` this crate links,
+//!   so the app has no second copy of the verifier to keep in sync.
+//! - A repeated call does nothing. So does a call after something else in the
+//!   app has already set up the same verifier.
+//! - Until a call has succeeded, TLS connections fail with an error that names
+//!   this module (reported like any other connection error), instead of the
+//!   verifier panicking on the first certificate check.
+//! - Not needed with [`TlsConfig::danger_accept_invalid_certs`] or a custom
+//!   `rustls::ClientConfig` (feature `rustls-config`), which don't use the
+//!   platform verifier.
+//!
+//! The app also needs the verifier's Kotlin component in its Gradle build,
+//! kept by Proguard: see the
+//! [rustls-platform-verifier Android section](https://github.com/rustls/rustls-platform-verifier#android).
+//!
+//! **Exempt from semver guarantees.** The signatures use types from `jni` and
+//! `rustls-platform-verifier`, both pre-1.0, and they follow those crates. The
+//! `jni` crate is re-exported as [`jni`] so the app names the same types.
+//!
+//! ```ignore
+//! #[unsafe(no_mangle)]
+//! pub extern "system" fn Java_com_example_App_nativeInit<'local>(
+//!     mut env: centrifuge::android::jni::Env<'local>,
+//!     _class: centrifuge::android::jni::objects::JClass<'local>,
+//!     context: centrifuge::android::jni::objects::JObject<'local>,
+//! ) {
+//!     centrifuge::android::init_with_env(&mut env, context).expect("TLS setup");
+//! }
+//! ```
+//!
+//! [`TlsConfig::danger_accept_invalid_certs`]: crate::TlsConfig::danger_accept_invalid_certs
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use jni::objects::{Global, JClassLoader, JObject};
+
+pub use jni;
+pub use rustls_platform_verifier::android::Runtime;
+
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Sets up the verifier from a JNI env and an Android `Context`. The simplest
+/// option when nothing else in the app keeps JVM references.
+///
+/// # Errors
+///
+/// [`Error::Configuration`](crate::Error::Configuration) if a JNI call fails
+/// (for example, `context` isn't a `Context`).
+pub fn init_with_env(env: &mut jni::Env<'_>, context: JObject<'_>) -> Result<(), crate::Error> {
+    rustls_platform_verifier::android::init_with_env(env, context)
+        .map_err(|e| crate::Error::Configuration(format!("Android TLS setup: {e}")))?;
+    INITIALIZED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Sets up the verifier from references the app already holds: the JVM, a
+/// global reference to a `Context`, and one to its class loader.
+pub fn init_with_refs(
+    java_vm: jni::JavaVM,
+    context: Global<JObject<'static>>,
+    loader: Global<JClassLoader<'static>>,
+) {
+    rustls_platform_verifier::android::init_with_refs(java_vm, context, loader);
+    INITIALIZED.store(true, Ordering::Release);
+}
+
+/// Sets up the verifier with a [`Runtime`] that serves the JVM, `Context` and
+/// class loader on demand. For apps that manage those themselves.
+pub fn init_with_runtime(runtime: &'static dyn Runtime) {
+    rustls_platform_verifier::android::init_with_runtime(runtime);
+    INITIALIZED.store(true, Ordering::Release);
+}
+
+/// Whether one of the `init_*` functions has succeeded.
+pub(crate) fn initialized() -> bool {
+    INITIALIZED.load(Ordering::Acquire)
+}
