@@ -37,7 +37,11 @@
 //! compiles. The Gradle snippet in the
 //! [rustls-platform-verifier Android section](https://github.com/rustls/rustls-platform-verifier#android)
 //! reads that version from `Cargo.lock`, so it stays in sync on its own;
-//! a version typed into Gradle by hand doesn't.
+//! a version typed into Gradle by hand doesn't. The Maven coordinate is
+//! `org.rustls:rustls-platform-verifier` (`0.2.0` here). The README's Groovy
+//! snippet declares it without the `org.` group, which its own version rule
+//! doesn't match, so the dependency fails to resolve; its Kotlin (`.kts`)
+//! snippet is right.
 //!
 //! **Exempt from semver guarantees.** The signatures use types from `jni` and
 //! `rustls-platform-verifier`, both pre-1.0, and they follow those crates. The
@@ -62,13 +66,9 @@
 //!     // Kotlin instead of aborting the app.
 //!     unowned_env
 //!         .with_env(|env| -> centrifuge::android::jni::errors::Result<bool> {
-//!             Ok(match centrifuge::android::init_with_env(env, context) {
-//!                 Ok(()) => true,
-//!                 Err(e) => {
-//!                     log::error!("{e}");
-//!                     false
-//!                 }
-//!             })
+//!             // On failure, log the error with your app's logger before
+//!             // returning `false`.
+//!             Ok(centrifuge::android::init_with_env(env, context).is_ok())
 //!         })
 //!         .resolve::<ThrowRuntimeExAndDefault>()
 //! }
