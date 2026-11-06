@@ -405,6 +405,32 @@ async fn send_resolves_when_written() {
     client.close().await;
 }
 
+/// Closing an HTTP-stream session stops an emulation request already in
+/// flight: its `send()` fails at once instead of after the request timeout,
+/// and the request's connection isn't held after the session is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_session_stops_inflight_emulation_request() {
+    let srv = server().await;
+    let client = builder(&srv, TransportKind::HttpStream, Protocol::Json)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    client.connect().unwrap();
+    client.ready(None).await.unwrap();
+    srv.hang_emulation(true);
+    let c = client.clone();
+    let send = tokio::spawn(async move { c.send(r#"{"a":1}"#).await });
+    // Let the request reach the (hanging) server.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.disconnect();
+    let r = tokio::time::timeout(Duration::from_secs(2), send)
+        .await
+        .expect("send() still waiting on the closed session's request")
+        .unwrap();
+    assert!(r.is_err(), "not written: {r:?}");
+    client.close().await;
+}
+
 /// A `send()` whose emulation request the server rejects (e.g. 413) fails with
 /// the transport's status, as documented, not as a disconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
