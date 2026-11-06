@@ -41,7 +41,11 @@ public API (spec §9.11).
   `Error::Configuration`. Before, the client ran and silently delivered no
   events.
 
-### Runtime and time usage found so far (a grep, not yet the full audit)
+### Runtime and time usage found so far (a sample, not the full audit)
+
+The table names the kinds of use, not every call site. A rough grep finds about
+60 matches in 10 files, tests included, which is more than the table's rows
+suggest. Step 2 replaces this table with the full list.
 
 | Use | Where | Wasm note |
 |---|---|---|
@@ -52,6 +56,7 @@ public API (spec §9.11).
 | `std::time::Instant::now()` | `driver.rs` (clock-jump watchdog) | panics on wasm |
 | `SystemTime::now()` | `driver.rs` (watchdog, `connected_since`), `client.rs` (`random_seed`) | panics on wasm |
 | `SystemTime` in the **public** API | `Statistics::connected_since: Option<SystemTime>` | type must stay `std::time::SystemTime` |
+| `tokio::task_local!` (`IN_CALLBACK`, §9.5) | declared in `dispatch.rs`; `IN_CALLBACK.scope(..)` wraps the token and state callbacks the driver spawns (`driver.rs`, 3 sites); read by `in_callback()` in `calls.rs` | the only symbol that needs tokio's `rt` feature; `rt` provides a task-local instead (step 3) |
 | `std::thread::Builder::spawn` | `dispatch.rs` (the `EventDelivery::Thread` event thread; the only thread the SDK spawns) | always fails on wasm; `Inline` is the wasm default (decision 8) |
 
 ## Supported environments
@@ -86,7 +91,8 @@ public API (spec §9.11).
    wasm API has drifted (missing `wrap_stream`, timeouts).
 2. **No Tokio runtime on wasm.** Wasm uses Tokio's synchronization primitives
    and macros where supported, but never instantiates a Tokio runtime. Task
-   execution, timers and clocks come from the internal `rt` module.
+   execution, task-locals, timers and clocks come from the internal `rt`
+   module.
 3. **A small `rt` interface driven by actual call sites,** not a copy of
    tokio's API.
 4. **Transport behind the existing internal trait.** The browser transports
@@ -137,14 +143,17 @@ public API (spec §9.11).
   `rustls-platform-verifier`, `hyper`, `hyper-util`, `http-body-util`, and
   `rustls` itself if `TlsConfig` can be kept without it (see step 8); gate the
   code that uses them.
-- Try tokio on wasm with `sync` and `macros` only, without `rt`. The plan
-  needs no tokio task or runtime types on wasm, so `rt` should be
-  unnecessary; keep it only if a used symbol needs it.
+- Tokio on wasm gets `sync` and `macros` only, without `rt`. One used
+  symbol needs `rt`: `tokio::task_local!`, for `IN_CALLBACK`. Once the `rt`
+  module provides a task-local of its own (step 3), nothing else does. A
+  prototype outside this repository reported the same; confirm it here.
 - Re-run `cargo check --target wasm32-unknown-unknown -p centrifuge-client`
   and list every remaining error.
 - `cargo tree --target wasm32-unknown-unknown -e features` to catch native-only
   dependencies leaking into the wasm graph.
-- `getrandom`: `Cargo.lock` has 0.2.17, 0.3.4 and 0.4.3. In the client's
+- `getrandom` (a prototype outside this repository reported the expected
+  result, an empty `cargo tree -i` for every version after gating; confirm it
+  here): `Cargo.lock` has 0.2.17, 0.3.4 and 0.4.3. In the client's
   normal dependency graph only 0.4.3 appears, through
   `tokio-tungstenite -> tungstenite -> rand`, which is native-only after
   gating. So the wasm graph is expected to contain **no** `getrandom`.
@@ -158,7 +167,7 @@ public API (spec §9.11).
   None exist today; keep it that way.
 
 ### 2. Runtime audit
-Complete the table above:
+Replace the sample table above with the full list of call sites. Cover:
 - every `tokio::spawn`, `tokio::runtime::Handle`, task handle and how it is
   used;
 - every `tokio::time` item, `std::time::Instant`, `SystemTime`;
@@ -200,6 +209,11 @@ pub(crate) async fn timeout<F: Future>(d: Duration, f: F) -> Result<F::Output, E
 pub(crate) async fn timeout_at<F: Future>(deadline: Instant, f: F) -> Result<F::Output, Elapsed>;
 pub(crate) struct Interval; // with tick() and missed-tick "Delay" behaviour
 
+// Task-local marker for "this task runs a token or state callback of client
+// `id`" (§9.5), replacing `tokio::task_local!` for `IN_CALLBACK`
+pub(crate) fn callback_scope<F: Future>(id: u64, f: F) -> impl Future<Output = F::Output>;
+pub(crate) fn in_callback(id: u64) -> bool;
+
 // Wall-clock time (None only if the browser clock value is invalid)
 pub(crate) fn system_now() -> Option<std::time::SystemTime>;
 
@@ -207,13 +221,33 @@ pub(crate) fn system_now() -> Option<std::time::SystemTime>;
 pub(crate) fn random_seed() -> u64;
 ```
 
-- Native: thin wrappers over `tokio::spawn`, `tokio::time` and
-  `SystemTime::now()`.
+- Native: thin wrappers over `tokio::spawn`, `tokio::time`,
+  `tokio::task_local!` and `SystemTime::now()`.
 - Wasm:
   - `spawn`: `wasm_bindgen_futures::spawn_local` wrapped in
     `futures_util::future::Abortable` (`futures-util` is already a
     dependency). `spawn_local` takes a `'static` future and runs it from the
     microtask queue; test both.
+  - `callback_scope`: a future wrapper that sets a thread-local `Cell<u64>`
+    to `id` before each poll of the inner future and restores the previous
+    value after it, also when the poll panics, the same way `HandlerScope`
+    does for handlers. Because the browser runs everything on one thread,
+    "set during each poll" means the same as tokio's task-local. It doesn't
+    leak into other tasks, which only run between polls.
+    A prototype was checked three ways:
+    - natively, side by side with tokio's real `task_local!` on a
+      `current_thread` runtime. Three interleaved tasks (scoped, unscoped,
+      differently scoped), nested scopes, and checks before and after awaits
+      gave identical results.
+    - built for `wasm32-unknown-unknown` with tokio limited to `sync` and
+      `macros`, and run under Node: every check held, and `select!` over a
+      `tokio::sync` channel worked.
+    - with the restore broken on purpose, the checks failed.
+
+    Panics abort on wasm32, so restoring after a panic only matters
+    natively, where it was tested. The prototype boxes the inner future
+    rather than use `unsafe` pinning (the crate forbids `unsafe`). Callbacks
+    are rare, so the allocation doesn't matter.
   - timers: backed by browser scheduling (`setTimeout` via the global
     scope), with these rules:
     - every sleep is deadline-based: when the timer fires, compare
@@ -434,7 +468,7 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 
 | Area | Test |
 |---|---|
-| Runtime | Abort a spawned task; drop a task handle; shutdown with pending timers; `'static` futures on `spawn_local` |
+| Runtime | Abort a spawned task; drop a task handle; shutdown with pending timers; `'static` futures on `spawn_local`; `callback_scope`: `in_callback(id)` true during each poll of the wrapped future, false in another task between polls, previous value restored after a poll and after a panic |
 | Timers | Past deadline; zero-duration sleep; duration above `2^31 - 1` ms (with a fake clock or by testing the clamping logic directly); cancellation on drop; first interval tick immediate; delayed tick without a catch-up burst |
 | Time | `system_now()` conversion tested on its own, including invalid inputs (NaN, negative, too large) and an unrepresentable time (`checked_add` fails) returning `None`; `connected_since` is set; seeds differ between clients; the `Math.random()` to `u32` conversion at 0 and just below 1 |
 | WebSocket | Server close with a non-1000 code; subprotocol not accepted; close-event mapping for 1005, 1006 with and without a prior `error` event, and 1015 (unit-test the mapping function, since browsers make these hard to trigger on demand); the sequence `error` then `close(1006)` gives exactly one terminal event (`Failed`); `close` after an abort gives no second terminal event |
@@ -477,8 +511,16 @@ The initial planned direct wasm-specific dependencies are `wasm-bindgen`,
 `wasm-bindgen-futures`, `js-sys`, `web-sys` and `web-time`, plus `tokio` with
 `sync` and `macros` (and `rt` only if step 1 shows it is needed). `time`
 stays off on wasm, so a stray tokio timer fails to compile instead of
-panicking. No `gloo-*`, `futures-timer` or `getrandom` backend. The step 1
-audit may change this list.
+panicking. No `futures-timer` and no `getrandom` backend.
+
+For `setTimeout`, either works:
+- a hand-written binding through the global scope, which needs no extra crate;
+- `gloo-timers` 0.4, which reportedly binds `setTimeout` on the global object,
+  so Workers work. Check that before choosing it; the Dedicated Worker test
+  (step 9) covers it either way.
+
+Either way, the deadline check, rescheduling and `2^31 - 1` ms clamp stay in
+`rt`. The step 1 audit may change this list.
 
 ## Expected size
 
