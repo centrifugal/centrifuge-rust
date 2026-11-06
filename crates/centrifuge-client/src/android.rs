@@ -13,7 +13,8 @@
 //! - A repeated call does nothing. So does a call after something else in the
 //!   app has already set up the same verifier.
 //! - Without it, `build()` fails with [`Error::Configuration`](crate::Error::Configuration)
-//!   if any endpoint is `wss://` or `https://`. A TLS connection that only
+//!   if any endpoint is `wss://` or `https://`, or HTTP-streaming is
+//!   configured with an `https://` `emulation_endpoint`. A TLS connection that only
 //!   becomes TLS later (an HTTPS proxy from the environment or OS settings)
 //!   fails that attempt with an error naming this module and is retried with
 //!   backoff, so a setup call that lands after `build()` (on another thread,

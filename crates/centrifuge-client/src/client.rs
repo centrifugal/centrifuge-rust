@@ -928,10 +928,7 @@ impl ClientBuilder {
         // A TLS endpoint can't work without the verifier's setup, so say so
         // here instead of retrying forever (docs/spec.md §5.2).
         #[cfg(target_os = "android")]
-        if endpoints
-            .iter()
-            .any(|(_, u)| matches!(u.scheme(), "wss" | "https"))
-        {
+        if uses_tls(&endpoints, emulation_endpoint.as_ref()) {
             net.android_tls_ready().map_err(Error::Configuration)?;
         }
 
@@ -1003,6 +1000,20 @@ fn random_seed() -> u64 {
     h.finish()
 }
 
+/// Whether a configured connection uses TLS: a `wss`/`https` endpoint, or an
+/// `https` emulation endpoint, which only HTTP-streaming uses. Android
+/// refuses these at `build()` until the verifier's setup (docs/spec.md §5.2).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn uses_tls(endpoints: &[(TransportKind, Url)], emulation: Option<&Url>) -> bool {
+    endpoints
+        .iter()
+        .any(|(_, u)| matches!(u.scheme(), "wss" | "https"))
+        || (emulation.is_some_and(|u| u.scheme() == "https")
+            && endpoints
+                .iter()
+                .any(|(k, _)| *k == TransportKind::HttpStream))
+}
+
 #[allow(dead_code)]
 fn _assert_traits() {
     fn send_sync<T: Send + Sync>() {}
@@ -1011,4 +1022,36 @@ fn _assert_traits() {
     send_sync::<ConnectedEvent>();
     send_sync::<ErrorEvent>();
     send_sync::<DisconnectedEvent>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TransportKind, Url, uses_tls};
+
+    fn ep(kind: TransportKind, url: &str) -> (TransportKind, Url) {
+        (kind, Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn uses_tls_covers_endpoints_and_emulation() {
+        let ws = ep(TransportKind::WebSocket, "ws://h/connection/websocket");
+        let wss = ep(TransportKind::WebSocket, "wss://h/connection/websocket");
+        let http = ep(TransportKind::HttpStream, "http://h/connection/http-stream");
+        let https = ep(
+            TransportKind::HttpStream,
+            "https://h/connection/http-stream",
+        );
+        let tls_emu = Url::parse("https://h/emulation").unwrap();
+        let plain_emu = Url::parse("http://h/emulation").unwrap();
+
+        assert!(!uses_tls(std::slice::from_ref(&ws), None));
+        assert!(uses_tls(&[wss], None));
+        assert!(uses_tls(&[https], None));
+        assert!(!uses_tls(std::slice::from_ref(&http), Some(&plain_emu)));
+        // A plain stream endpoint with an HTTPS emulation endpoint still uses TLS.
+        assert!(uses_tls(std::slice::from_ref(&http), Some(&tls_emu)));
+        assert!(uses_tls(&[ws.clone(), http], Some(&tls_emu)));
+        // Without HTTP-streaming, the emulation endpoint is never used.
+        assert!(!uses_tls(&[ws], Some(&tls_emu)));
+    }
 }
