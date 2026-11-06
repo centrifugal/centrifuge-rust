@@ -23,6 +23,23 @@ public API (spec §9.11).
 - `cargo check --target wasm32-unknown-unknown -p centrifuge-client` fails
   first on `tokio`'s `net` feature (`mio` is unsupported on wasm). Later errors
   are unknown until the native-only dependencies are gated.
+- **Android support (#2, #4) set the pattern for platform checks.**
+  - `centrifuge::android` is Android-only, and `jni` is an Android-only
+    dependency, so neither reaches wasm.
+  - Its preconditions are checked in two places. In `build()`,
+    `configured_tls` plus `Net::android_tls_ready()` check TLS endpoints, an
+    `https://` emulation endpoint and an explicit `https://` proxy. At the
+    start of `Net::connect()`, before any DNS or TCP, the same check covers
+    proxies known only per attempt.
+  - That is 8 `cfg(target_os = "android")` sites across `lib.rs`,
+    `client.rs` and `transport/net.rs`.
+  - Helpers: `TlsConfig::uses_platform_verifier()` and `net::uses_tls(url)`.
+- **Threads.** `EventDelivery::Thread`, the default, spawns the
+  `centrifuge-events` thread. On wasm32-unknown-unknown
+  `std::thread::Builder::spawn` returns `Err`; this was checked with a small
+  module run under Node. Since #5, a failed spawn makes `build()` fail with
+  `Error::Configuration`. Before, the client ran and silently delivered no
+  events.
 
 ### Runtime and time usage found so far (a grep, not yet the full audit)
 
@@ -35,6 +52,7 @@ public API (spec §9.11).
 | `std::time::Instant::now()` | `driver.rs` (clock-jump watchdog) | panics on wasm |
 | `SystemTime::now()` | `driver.rs` (watchdog, `connected_since`), `client.rs` (`random_seed`) | panics on wasm |
 | `SystemTime` in the **public** API | `Statistics::connected_since: Option<SystemTime>` | type must stay `std::time::SystemTime` |
+| `std::thread::Builder::spawn` | `dispatch.rs` (the `EventDelivery::Thread` event thread; the only thread the SDK spawns) | always fails on wasm; `Inline` is the wasm default (decision 8) |
 
 ## Supported environments
 
@@ -74,14 +92,42 @@ public API (spec §9.11).
 4. **Transport behind the existing internal trait.** The browser transports
    carry bytes only; protocol, emulation, auth and token refresh stay shared.
 5. **No runtime or JavaScript types in the public API.**
-6. **Unsupported options stay in the API and fail at `build()`** (spec §9.11).
-   Setters such as `proxy`, `tls` and `http_headers` keep their native
-   signatures on wasm, and `ClientBuilder::build()` returns a configuration
-   error if one was set; options are never silently ignored. The one
-   exception is `runtime(tokio::runtime::Handle)`: its parameter type does not
-   exist without a Tokio runtime, so it is native-only. `emulated_headers` is
-   the browser replacement for `http_headers`: those headers travel inside
-   the connect command (Centrifugo header emulation), not as HTTP headers.
+6. **An option the app explicitly sets, but that means nothing on the platform,
+   is a configuration error at `build()`** (spec §9.11). This is the same rule
+   Android follows for extra roots.
+   - Setters such as `proxy`, `tls` and `http_headers` keep their native
+     signatures on wasm, and `ClientBuilder::build()` returns a
+     configuration error if one was set.
+   - "Explicitly" matters. A default documented as best effort stays best
+     effort: `ProxyConfig::System` is the default and already means
+     "environment variables only" on Linux, iOS and Android. In a browser it
+     means "the browser decides", with no error.
+   - An option that another option overrides is documented on both, as extra
+     roots under a custom rustls config are today.
+   - The one exception is `runtime(tokio::runtime::Handle)`. Its parameter
+     type doesn't exist without a Tokio runtime, so it's native-only.
+   - `emulated_headers` is the browser replacement for `http_headers`: those
+     headers travel inside the connect command (Centrifugo header emulation),
+     not as HTTP headers.
+7. **Platform preconditions live in one internal `platform` module.** It has
+   two hooks with a body per platform (native no-op, Android, wasm):
+   - `platform::check_build(..)`, called from `build()`, checks everything
+     known at build time;
+   - `platform::check_attempt(..)`, called at the start of every connection
+     attempt before any I/O, checks what's only known then, and fails that
+     attempt so it's retried with backoff.
+
+   Android's existing checks move there first (step 3), so the wasm checks
+   (unsupported options, `EventDelivery::Thread`, a missing browser API) don't
+   add more scattered `cfg` blocks to `build()` and `connect()`.
+8. **`EventDelivery::Inline` is the default on wasm.** There are no threads,
+   and since #5 a failed spawn fails `build()`, so keeping `Thread` as the
+   wasm default would make every default-configured browser client fail.
+   - On wasm, `EventDelivery::default()` returns `Inline` (a target-dependent
+     default).
+   - An explicit `Thread` fails in `platform::check_build` with a
+     wasm-specific message, before any spawn is attempted.
+   - Native defaults are unchanged.
 
 ## Steps
 
@@ -130,6 +176,15 @@ first; its implementations are available on wasm, but each composition still
 has to meet the target's `Send` constraints.
 
 ### 3. Minimal `rt` module (written in-house)
+
+First, move Android's checks into the `platform` module (decision 7), with no
+change in behavior. Native and Android tests must stay green, and the Android
+CI jobs must still build. Two parts:
+- the `build()` check is computed from `TlsConfig::uses_platform_verifier()`
+  and the init flag, not through `Net::android_tls_ready()`, because `Net`,
+  the native connector, doesn't exist on wasm;
+- the attempt check in `Net::connect()` calls `platform::check_attempt`.
+
 Expected interface, from the call sites found so far:
 
 ```rust
@@ -243,6 +298,14 @@ Limits, to document rather than work around:
   any) are all the SDK can report.
 
 ### 6. Browser WebSocket transport (`web-sys::WebSocket`)
+
+The deliverable includes the first **real-browser smoke test**: headless
+Chrome against a real Centrifugo, which connects, subscribes, receives a
+publication and closes. Android showed that a real run settles more than
+review rounds do. The emulator run confirmed the setup in one go, after
+several reviews of the same code. So this test comes now, not in step 9;
+step 9 widens the coverage.
+
 - Subprotocol `centrifuge-protobuf` for protobuf (same string as
   `transport/ws.rs`); after open, check `websocket.protocol` and fail with a
   clear error if the server did not accept it.
@@ -324,7 +387,22 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   native-only too; on wasm the dispatcher spawns through `rt`.
 - `proxy(ProxyConfig)`, `tls(TlsConfig)`, `http_headers(HeaderMap)`: stay with
   native signatures; `build()` returns a configuration error on wasm if any
-  was set. `TlsConfig` stores `rustls` types internally. On wasm, prefer an
+  was **explicitly** set (decision 6), through `platform::check_build`.
+  - `proxy` defaults to `ProxyConfig::System`, so the builder has to record
+    whether `proxy()` was called. A bare `ProxyConfig` value can't tell the
+    default from an explicit `System`.
+  - `danger_accept_invalid_certs` is rejected too, because a browser can't
+    turn verification off.
+  - `Client::set_proxy` already returns `Result<(), Error>` ("leaves room
+    for validation"). On wasm it returns `Error::Configuration` for any proxy
+    other than `ProxyConfig::System`, so changing the proxy at runtime can't
+    be silently ignored either.
+  - `TlsConfig::uses_platform_verifier()` (from #4) isn't used on wasm: the
+    browser verifies, and the client never sees a rustls config.
+- `EventDelivery`: `Inline` by default on wasm, and an explicit `Thread`
+  rejected with a wasm-specific message (decision 8). Document the
+  target-dependent default on `EventDelivery` and on
+  `ClientBuilder::event_delivery`. `TlsConfig` stores `rustls` types internally. On wasm, prefer an
   empty `cfg` variant: the type and its constructors keep their signatures,
   but store only "TLS was configured", since `build()` rejects it anyway.
   Keep `rustls-pki-types` only if a constructor's signature needs one of its
@@ -365,7 +443,7 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 | Reconnect | A replaced streaming session's late chunks never reach the new session |
 | Lifecycle | Drop the client while connecting; drop it while streaming |
 | Protocol | Several frames in one chunk; one frame split across many chunks |
-| Config | Each unsupported option makes `build()` fail on wasm |
+| Config | Each explicitly set unsupported option makes `build()` fail on wasm; the defaults (`ProxyConfig::System`, no TLS options) don't; an explicit `EventDelivery::Thread` fails; the default client builds and delivers events (`Inline`) |
 | Errors | No `JsValue` reaches a public SDK error type |
 | Environment | Unsupported environment gives a clear error |
 
@@ -425,10 +503,11 @@ updated deliberately.
 
 1. Wasm compilation baseline.
 2. Runtime and dependency audit.
-3. Minimal `rt`, including wall-clock time.
+3. `platform` module (Android's checks moved, no behavior change), then the
+   minimal `rt`, including wall-clock time.
 4. Native regression and semver tests.
 5. Browser error conversion.
-6. Browser WebSocket transport.
+6. Browser WebSocket transport, with the first real-browser smoke test.
 7. Browser HTTP-streaming transport.
 8. Public API and configuration validation.
 9. Browser integration tests, Worker test and CI.
