@@ -869,8 +869,9 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// [`Error::Configuration`] for invalid options (durations must be
-    /// longer than zero and at most 24 hours), or when there's no Tokio runtime
-    /// (neither [`runtime()`](Self::runtime) nor a current one).
+    /// longer than zero and at most 24 hours), when there's no Tokio runtime
+    /// (neither [`runtime()`](Self::runtime) nor a current one), or when the
+    /// event thread of [`EventDelivery::Thread`] can't be started.
     #[allow(clippy::too_many_lines)] // validation, then wiring; clearer in one place
     pub fn build(self) -> Result<Client, Error> {
         let endpoints = self.endpoints()?;
@@ -970,7 +971,7 @@ impl ClientBuilder {
             client: Arc::downgrade(&inner),
             shared: shared.clone(),
         };
-        let dispatcher = Dispatcher::new(self.event_delivery, delivery, runtime.clone());
+        let dispatcher = Dispatcher::new(self.event_delivery, delivery, runtime.clone())?;
         let driver = Driver::new(
             core,
             shared,
