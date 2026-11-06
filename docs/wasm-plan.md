@@ -68,7 +68,7 @@ suggest. Step 2 replaces this table with the full list.
 |---|---|
 | Browser main thread | Supported |
 | Dedicated Worker | Supported, integration tested |
-| Shared Worker | Expected to work; not initially verified. Same global APIs as a Dedicated Worker, but it lives as long as any connected page does, so one client may outlive the page that created it |
+| Shared Worker | Expected to work; not initially verified. Same global APIs as a Dedicated Worker, but it lives as long as any connected page does, so one client may outlive the page that created it. The SDK doesn't manage the Shared Worker's lifetime or track the pages connected to it; the app decides when to close the client |
 | Service Worker | Not supported: the browser stops it when idle, so it can't hold a long-lived connection |
 | Node.js | Not supported initially (separate decision) |
 | Other JS runtimes | Not guaranteed |
@@ -132,6 +132,17 @@ suggest. Step 2 replaces this table with the full list.
    - `platform::check_attempt(..)`, called at the start of every connection
      attempt before any I/O, checks what's only known then, and fails that
      attempt so it's retried with backoff.
+
+   The split is also the line between permanent and transient. A condition
+   that can't change for the life of the client (an unsupported option, a
+   missing browser API, `EventDelivery::Thread` on wasm) is checked in
+   `check_build`, so it never starts a reconnect loop. `check_attempt` is
+   only for conditions that can become true later, which is why retrying is
+   right: Android's verifier can be initialized after `build()`, and the
+   proxy is chosen per attempt. A browser global deleted after `build()`
+   is the only permanent case `check_attempt` can meet; retrying it is
+   harmless (backoff caps the rate, each attempt reports the error), and
+   giving it a terminal path of its own isn't worth the core change.
 
    Android's existing checks move there first (step 3), so the wasm checks
    (unsupported options, `EventDelivery::Thread`, a missing browser API; see
@@ -335,6 +346,11 @@ pub(crate) fn random_seed() -> u64;
     entropy path, no `getrandom` and no `Crypto` binding; this is enough for
     jitter, which is not security-relevant. If the SDK ever needs
     cryptographic randomness on wasm, that needs its own decision.
+    `Math.random()` is part of JavaScript itself and can't throw. A value
+    outside `[0, 1)` (only possible if a script replaced it) still can't
+    break anything: Rust's `f64` to `u32` cast saturates, and NaN becomes 0,
+    so the worst case is the same seed for every client, which only makes
+    jitter less effective.
 - **Task handle: abort-only.** The driver only stores and aborts handles, so
   there is no awaitable `JoinHandle` and no completion channel. Extension
   point: if a call site ever needs a task's result, add a separate
@@ -372,6 +388,18 @@ Done before the transports, because both use it. `JsValue` is not
 Distinct cases: fetch rejection, HTTP status error, missing body,
 stream-reader error, WebSocket construction error, WebSocket runtime error,
 abort / cancellation, unsupported environment.
+
+Aborts never need classifying from the browser's error. The SDK only aborts
+an operation because the driver or the writer decided to, and that code
+already knows why. It reports that reason itself, and the abort's rejection
+is never turned into an error:
+- `disconnect()` / `close()`: the user's request; no reconnect;
+- session replacement: nothing is reported, since the old session's
+  results are dropped by `TransportId`;
+- a connect or request timeout: the driver's existing timeout error, as on
+  native;
+- a rejection the SDK didn't cause (network failure, CORS): the
+  fetch-rejection error, then reconnect with backoff.
 
 Limits, to document rather than work around:
 - CORS failures reach JavaScript as generic network errors; they map to the
@@ -457,18 +485,33 @@ step 9 widens the coverage.
 - **Cancellation is cleanup on drop.** On wasm, aborting a task only drops
   its Rust future. Dropping a future that awaits a `fetch` promise does
   **not** cancel the request, so the browser would keep the HTTP connection.
-  The session therefore holds a guard whose `Drop`:
-  - calls `AbortController.abort()`;
-  - cancels the body reader (`reader.cancel()`), if the response arrived;
-  - is idempotent, so a normal end followed by an abort is harmless.
+  The session therefore holds a guard whose `Drop` calls
+  `AbortController.abort()`, which is idempotent, so a normal end followed
+  by an abort is harmless.
+  - `abort()` is the whole cancellation. It is synchronous and covers both
+    the request and a response body already streaming: the body stream
+    errors, and a pending `read()` rejects. The SDK doesn't call
+    `reader.cancel()`: it returns a promise that `Drop` can't await, and
+    after `abort()` it adds nothing.
+  - No promise the SDK creates is left without a rejection handler.
+    `wasm_bindgen_futures::JsFuture` attaches one when it's created, also
+    if the future is later dropped; any promise not wrapped in a
+    `JsFuture` gets an explicit no-op `catch`. So an abort never shows up
+    as an unhandled rejection.
 
   It runs on every path: normal end, error, abort by the driver, and the
   client being dropped. A rejection that arrives after the abort finds no
   task left to wake, or a "closed" flag already set, so it can't produce a
   second terminal event.
-- **Outbound POSTs belong to their session.** Each one is sent by that
-  session's emulation writer, with an `AbortController` the session owns.
-  - Closing the session aborts a POST in flight. Its calls fail with
+- **Outbound POSTs belong to their session.** The session's emulation
+  writer sends them one at a time, in order, as on native, so at most one
+  is in flight per session.
+  - Each POST gets its own `AbortController`, created with the request and
+    held by the writer's future until the response is read. It never
+    outlives its POST, so there is no list of controllers to keep or
+    clean up.
+  - Closing the session makes the writer drop that future, and the
+    controller's guard aborts the request. Its calls fail with
     `ClientDisconnected`, the same error used when a POST's outcome is
     unknown. Native does the same (#7).
   - POSTs are never retried, so a command can't be sent twice. A command
@@ -502,6 +545,23 @@ step 9 widens the coverage.
   `no-cors` gives an opaque response the protocol can't read, and the other
   values add nothing for this SDK.
 - Keep the WebSocket to HTTP-stream fallback logic shared.
+- **Authentication differs by transport in a browser**, and the docs
+  (step 10) say so:
+  - a token (`token` / `get_token`) travels in the connect command, so it
+    works the same over WebSocket and HTTP-streaming, same- or
+    cross-origin. It's the recommended setup;
+  - cookies: a browser `WebSocket` always sends the target's cookies,
+    subject to their `SameSite` rules, and the SDK can't turn that off;
+    `fetch` sends them only as `credentials` allows (`same-origin` by
+    default). So a cookie-authenticated app that's served cross-origin
+    connects over WebSocket but fails after falling back to HTTP-streaming,
+    unless `credentials` is `include` and the server's CORS setup allows
+    credentials (above);
+  - `Origin`: the browser sets it on both and the app can't change it;
+    Centrifugo checks WebSocket origins against `allowed_origins`, and
+    `fetch` goes through CORS;
+  - custom HTTP headers can't be set on a browser WebSocket, which is why
+    `http_headers` is rejected and `emulated_headers` exists (decision 6).
 
 ### 8. Public API and configuration (non-breaking)
 
@@ -580,9 +640,15 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 
 - **Dedicated Worker test:** create a real Dedicated Worker, load the wasm
   module in it, build the client there, connect to Centrifugo, subscribe and
-  receive a publication, then terminate the Worker and check the server sees
-  the disconnect. A normal `wasm-bindgen-test` run does not prove Worker
-  support.
+  receive a publication. Then two endings, as separate runs:
+  1. close the client inside the Worker and check the server sees a clean
+     disconnect;
+  2. call `worker.terminate()` with the client still running and check the
+     server sees the connection drop. Termination runs no Rust code, so no
+     `Drop` cleanup happens; the browser closes the Worker's sockets
+     itself. The docs must not suggest otherwise.
+
+  A normal `wasm-bindgen-test` run does not prove Worker support.
 - CI: `cargo check --target wasm32-unknown-unknown` for core and client,
   `cargo semver-checks`, `cargo tree --target wasm32-unknown-unknown -e features`,
   a grep that fails on `spawn_blocking`, `block_in_place` and `blocking_*`,
