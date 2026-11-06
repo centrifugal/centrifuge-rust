@@ -5,8 +5,11 @@ Status: proposal. Nothing here is implemented yet.
 ## Goal
 
 Run `centrifuge-client` on `wasm32-unknown-unknown` with both transports
-(WebSocket and HTTP-streaming), with **no breaking change** to the native
-public API (spec §9.11).
+(WebSocket and HTTP-streaming), **preserving the native public API and its
+behavior** (spec §9.11). On wasm, the API may differ in defaults and trait
+bounds where the browser execution model requires it; each difference is
+listed and documented (the `EventDelivery` default, decision 8; the
+`close()` future without `Send`, step 8; native-only `runtime()`, decision 6).
 
 ## Verified starting point
 
@@ -73,9 +76,16 @@ suggest. Step 2 replaces this table with the full list.
 - No dependency on `window`: `WebSocket`, `fetch`, `setTimeout`,
   `AbortController`, `Date` and `Math` are reached through the global scope
   (`js_sys::global()`).
-- The global APIs are looked up and validated when a transport is created,
-  not assumed from the target. A missing API gives a clear "unsupported
-  environment" error.
+- The global APIs are looked up and validated, not assumed from the target,
+  and a missing one gives a clear "unsupported environment"
+  `Error::Configuration` instead of a panic. They're checked in
+  `platform::check_build` (decision 7), before anything uses them:
+  `setTimeout` / `clearTimeout` always (timers run from the first
+  connection attempt), and `WebSocket`, or `fetch` with `AbortController`,
+  for the configured endpoint kinds. `Date` and `Math` are part of
+  JavaScript itself, present in every engine, and not checked. The
+  transport also checks its API when it creates a session, so a global
+  removed after `build()` fails that attempt instead of panicking.
 - Tasks run on `spawn_local`, which needs a running JavaScript event loop;
   document that.
 - Initially tested browsers: Chrome and Firefox. Safari / WebKit is not
@@ -124,7 +134,8 @@ suggest. Step 2 replaces this table with the full list.
      attempt so it's retried with backoff.
 
    Android's existing checks move there first (step 3), so the wasm checks
-   (unsupported options, `EventDelivery::Thread`, a missing browser API) don't
+   (unsupported options, `EventDelivery::Thread`, a missing browser API; see
+   "Supported environments") don't
    add more scattered `cfg` blocks to `build()` and `connect()`.
 8. **`EventDelivery::Inline` is the default on wasm.** There are no threads,
    and since #5 a failed spawn fails `build()`, so keeping `Thread` as the
@@ -134,6 +145,11 @@ suggest. Step 2 replaces this table with the full list.
    - An explicit `Thread` fails in `platform::check_build` with a
      wasm-specific message, before any spawn is attempted.
    - Native defaults are unchanged.
+   - Inline means callbacks run on the browser's event loop, the same thread
+     that reads sockets, fires timers and renders the page. A slow callback
+     delays incoming messages, timers and reconnects, and blocks other work
+     on the page. Document that callbacks must not block (on native, an
+     `Inline` callback already delays the driver the same way).
 
 ## Steps
 
@@ -244,6 +260,18 @@ pub(crate) fn random_seed() -> u64;
       `tokio::sync` channel worked.
     - with the restore broken on purpose, the checks failed.
 
+    Guarantees the implementation must keep, each with a test:
+    - the previous value is restored by a guard's `Drop`, not by resetting
+      it by hand, so a return, a `Pending` and a panic all restore it;
+    - nested scopes, including scopes for two different clients, restore
+      the outer client's id when the inner poll returns;
+    - an unscoped future never sees an id: it's either polled in another
+      task, between polls of the scoped one, or nested inside a scoped poll,
+      where seeing the outer id is the same as tokio's task-local;
+    - reentrancy can't corrupt it: a callback that synchronously polls
+      another scoped future (or calls `close()`) only nests a guard, and
+      guards unwind in order.
+
     Panics abort on wasm32, so restoring after a panic only matters
     natively, where it was tested. The prototype boxes the inner future
     rather than use `unsafe` pinning (the crate forbids `unsafe`). Callbacks
@@ -258,7 +286,21 @@ pub(crate) fn random_seed() -> u64;
       longer waits reschedule;
     - a past deadline or zero duration completes on the next poll without
       waiting for a timer;
-    - dropping a sleep, timeout or interval calls `clearTimeout`;
+    - dropping a sleep, timeout or interval calls `clearTimeout` and only
+      then frees the JavaScript callback (`Closure`). A callback freed while
+      its `setTimeout` is pending makes the browser call freed code, which
+      throws from the event loop;
+    - the callback reaches Rust state only through a shared waker slot
+      (`Rc<RefCell<Option<Waker>>>`); the future owns the slot and the
+      `Closure`. A callback that fires anyway (its `clearTimeout` raced the
+      event loop) only wakes a task, which finds nothing to do;
+    - rescheduling replaces the pending `setTimeout` (clear, then set); at
+      most one is pending per sleep;
+    - `timeout` / `timeout_at` keep tokio's order: poll the wrapped future
+      first, and return `Elapsed` only if it's still pending once the
+      deadline has passed. A future that completes on the poll at the
+      deadline wins. Dropping the timeout drops the wrapped future and
+      clears the timer;
   - `Interval` keeps tokio's semantics: the first tick completes
     immediately; later ticks follow the period; with `Delay`, a late tick
     schedules the next one a full period after it, so there is never a
@@ -273,10 +315,17 @@ pub(crate) fn random_seed() -> u64;
     so an unrepresentable time can't panic. On an invalid value or a failed
     `checked_add`, return `None` (native
     always returns `Some`), and each caller handles it without inventing a
-    time: `connected_since` stays `None` instead of showing 1970, and the
-    clock-jump watchdog skips that check. Log it at `warn` through
-    `tracing`. The precision is milliseconds, coarser than native; document
-    it on `connected_since`;
+    time. There are three callers today:
+    - the clock-jump watchdog (`driver.rs`, its start and each check) skips
+      that check, and takes the next valid reading as its new base;
+    - `connected_since` (`driver.rs`) stays `None` instead of showing 1970;
+    - `random_seed()` (`client.rs`) uses only the `Math.random()` part.
+
+    Wall-clock time feeds nothing else: backoff, timeouts and pings use
+    `Instant`. Step 2 confirms there are no other callers. Log the first
+    `None` at `warn` through `tracing`, and later ones at `debug`, so a
+    broken clock can't flood the log. The precision is milliseconds,
+    coarser than native; document it on `connected_since`;
   - `random_seed()`: take two `Math.random()` values, convert each to a
     `u32` as `(x * 2^32) as u32` (`x` is in `[0, 1)`, so this is in range;
     it gives enough non-cryptographic variation for backoff jitter, and
@@ -355,12 +404,20 @@ step 9 widens the coverage.
 
     | `CloseEvent` | Native equivalent | `CloseReason` |
     |---|---|---|
-    | a real code (1000, 3000-4999, other valid codes) | close frame with that code | `Frame { code, reason }` |
+    | a code an endpoint may send (1000-1003, 1007-1014, 3000-4999) | close frame with that code | `Frame { code, reason }` |
     | 1005 | close frame without a code | `Eof` |
     | 1006, no `error` event before it | stream ended without a close frame | `Eof` |
     | 1006 or 1015 after an `error` event | read or connect error | `Failed { .. }` |
+    | 1015 without an `error` event | TLS failure | `Failed { .. }` |
+    | any other code no endpoint may send (1004, 1016-2999, below 1000, above 4999) | tungstenite replaces an invalid code with 1002 "Protocol violation" | `Frame { code: 1002, reason: "Protocol violation" }` |
+
+    Browsers fail the connection on an invalid code in a close frame, so in
+    practice the last row is reported as 1006; it is there so every code
+    has an answer.
 
     Keep the raw browser code in the `Failed` message, for diagnostics.
+    The mapping is one function over every `u16`, unit-tested over the
+    whole range, so no code falls through.
   - **Error-event ordering.** An `error` event is not terminal on its own:
     the transport records it as pending session state and reports nothing.
     Browsers always fire `close` after `error` (WHATWG WebSocket spec), and
@@ -369,6 +426,22 @@ step 9 widens the coverage.
     (`ctx.closed(..)`), guarded by a per-session "closed" flag, so that a
     late event, an abort and a close can't produce duplicate or
     contradictory reports.
+  - **Session ownership and cleanup.** The session owns the `WebSocket` and
+    its four `Closure`s, and cleans up in its `Drop`, which runs both on a
+    normal end and when the driver aborts the task. In order:
+    1. set the "closed" flag, so an event already queued reports nothing;
+    2. clear `onopen`, `onmessage`, `onerror` and `onclose`;
+    3. call `close()` (1000) if the socket is connecting or open;
+    4. only then free the `Closure`s.
+
+    A `Closure` freed while the socket can still call it makes the browser
+    call freed code, which throws from the event loop. The handlers reach
+    the session's state through an `Rc` they share with it, never by
+    borrowing the session, so cleanup during a handler is safe. Events
+    queued for a replaced session go nowhere, and anything already sent
+    carries its `TransportId` and is dropped by the driver.
+  - An abort before `open` (the connect timeout, `disconnect()`) runs the
+    same cleanup; the browser then cancels the handshake.
 - No control-frame ping/pong in browsers; rely on Centrifugo application
   pings (already in the shared logic).
 - Get connect, subscribe, publish, pings, reconnect and shutdown working
@@ -381,6 +454,28 @@ step 9 widens the coverage.
   the old session is aborted, and anything it still reports is dropped by
   the driver's id check. Aborting an old session cannot touch the new one,
   because they share no state.
+- **Cancellation is cleanup on drop.** On wasm, aborting a task only drops
+  its Rust future. Dropping a future that awaits a `fetch` promise does
+  **not** cancel the request, so the browser would keep the HTTP connection.
+  The session therefore holds a guard whose `Drop`:
+  - calls `AbortController.abort()`;
+  - cancels the body reader (`reader.cancel()`), if the response arrived;
+  - is idempotent, so a normal end followed by an abort is harmless.
+
+  It runs on every path: normal end, error, abort by the driver, and the
+  client being dropped. A rejection that arrives after the abort finds no
+  task left to wake, or a "closed" flag already set, so it can't produce a
+  second terminal event.
+- **Outbound POSTs belong to their session.** Each one is sent by that
+  session's emulation writer, with an `AbortController` the session owns.
+  - Closing the session aborts a POST in flight. Its calls fail with
+    `ClientDisconnected`, the same error used when a POST's outcome is
+    unknown. Native does the same (#7).
+  - POSTs are never retried, so a command can't be sent twice. A command
+    interrupted mid-POST may or may not have reached the server, like any
+    write a disconnect interrupts.
+  - A POST that completes late carries the old `TransportId`, so it can't
+    affect the new session.
 - POST with the connect command, read `response.body.getReader()`, feed every
   chunk to the core's `StreamDecoder`; EOF calls `finish()`.
 - Client-to-server messages go through the same emulation writer path as
@@ -468,18 +563,20 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 
 | Area | Test |
 |---|---|
-| Runtime | Abort a spawned task; drop a task handle; shutdown with pending timers; `'static` futures on `spawn_local`; `callback_scope`: `in_callback(id)` true during each poll of the wrapped future, false in another task between polls, previous value restored after a poll and after a panic |
-| Timers | Past deadline; zero-duration sleep; duration above `2^31 - 1` ms (with a fake clock or by testing the clamping logic directly); cancellation on drop; first interval tick immediate; delayed tick without a catch-up burst |
-| Time | `system_now()` conversion tested on its own, including invalid inputs (NaN, negative, too large) and an unrepresentable time (`checked_add` fails) returning `None`; `connected_since` is set; seeds differ between clients; the `Math.random()` to `u32` conversion at 0 and just below 1 |
-| WebSocket | Server close with a non-1000 code; subprotocol not accepted; close-event mapping for 1005, 1006 with and without a prior `error` event, and 1015 (unit-test the mapping function, since browsers make these hard to trigger on demand); the sequence `error` then `close(1006)` gives exactly one terminal event (`Failed`); `close` after an abort gives no second terminal event |
-| HTTP-stream | Non-2xx response; missing body; EOF with an incomplete frame; abort while waiting for a chunk |
+| Runtime | Abort a spawned task; abort a task while it awaits a timer (the timer is cleared); drop a task handle; shutdown with pending timers; `'static` futures on `spawn_local`; `callback_scope`: `in_callback(id)` true during each poll of the wrapped future, false in another task between polls, previous value restored after a poll and after a panic; nested scopes for two different clients |
+| Timers | Past deadline; zero-duration sleep; duration above `2^31 - 1` ms (with a fake clock or by testing the clamping logic directly); cancellation on drop; first interval tick immediate; delayed tick without a catch-up burst; a timer firing long after its deadline, as after a background tab resumes (fake clock: the deadline re-check completes it once, without a burst); `timeout` at the boundary (the wrapped future ready on the deadline poll wins); drop a `timeout` while the wrapped future is pending (both dropped, timer cleared) |
+| Time | `system_now()` conversion tested on its own, including invalid inputs (NaN, negative, too large) and an unrepresentable time (`checked_add` fails) returning `None`; each of the three callers with `None` (watchdog skips, `connected_since` stays `None`, seed still varies); `connected_since` is set; seeds differ between clients; the `Math.random()` to `u32` conversion at 0 and just below 1 |
+| WebSocket | Server close with a non-1000 code; subprotocol not accepted; the close-code mapping over every `u16` (a unit test, since browsers make synthetic codes hard to trigger on demand); the sequence `error` then `close(1006)` gives exactly one terminal event (`Failed`); `close` after an abort gives no second terminal event; abort before `open`; a late event after the session was replaced reaches nothing; handlers cleared after a normal close and after an abort (no "closure invoked after being dropped" error) |
+| HTTP-stream | Non-2xx response; missing body; EOF with an incomplete frame; abort while waiting for the response headers; abort while waiting for a chunk; after each abort the request is cancelled in the browser (the server sees the connection close), not just forgotten by Rust |
+| Outbound | Close a session while a POST is in flight: the POST is aborted and its `send()` fails at once with `ClientDisconnected`; an old session's POST that completes after the new session opened doesn't affect it |
+| Callbacks | A callback calls `close()`; a callback's work starts another callback; a slow callback delays later events but loses or duplicates none |
 | CORS | Same-origin request (no preflight); cross-origin preflight succeeds with the right server config; a CORS failure rejects the request and maps to the fetch-rejection error; credentialed requests with an explicit origin |
 | Reconnect | A replaced streaming session's late chunks never reach the new session |
 | Lifecycle | Drop the client while connecting; drop it while streaming |
 | Protocol | Several frames in one chunk; one frame split across many chunks |
 | Config | Each explicitly set unsupported option makes `build()` fail on wasm; the defaults (`ProxyConfig::System`, no TLS options) don't; an explicit `EventDelivery::Thread` fails; the default client builds and delivers events (`Inline`) |
 | Errors | No `JsValue` reaches a public SDK error type |
-| Environment | Unsupported environment gives a clear error |
+| Environment | A missing `setTimeout`, `WebSocket` or `fetch` (deleted from the global scope in the test) makes `build()` fail with `Error::Configuration`, not a panic |
 
 - **Dedicated Worker test:** create a real Dedicated Worker, load the wasm
   module in it, build the client there, connect to Centrifugo, subscribe and
@@ -503,6 +600,7 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 - Timing notes: `connected_since` has millisecond precision on wasm; timers
   can fire late in background tabs.
 - Event-loop requirement, supported environments, tested browsers.
+- Callbacks run on the browser event loop and must not block (decision 8).
 - CHANGELOG entry; update spec §9.11, decision 3 and the roadmap row.
 
 ## Dependencies
