@@ -82,7 +82,7 @@ suggest. Step 2 replaces this table with the full list.
   `platform::check_build` (decision 7), before anything uses them:
   `setTimeout` / `clearTimeout` always (timers run from the first
   connection attempt), and `WebSocket`, or `fetch` with `AbortController`,
-  for the configured endpoint kinds. `Date` and `Math` are part of
+  for the kind of every configured endpoint, fallbacks included (fallback is the configured endpoint list, tried in order). `Date` and `Math` are part of
   JavaScript itself, present in every engine, and not checked. The
   transport also checks its API when it creates a session, so a global
   removed after `build()` fails that attempt instead of panicking.
