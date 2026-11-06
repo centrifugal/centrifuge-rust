@@ -86,6 +86,14 @@ suggest. Step 2 replaces this table with the full list.
   JavaScript itself, present in every engine, and not checked. The
   transport also checks its API when it creates a session, so a global
   removed after `build()` fails that attempt instead of panicking.
+- **Browser calls that can throw are called with `catch`.** Some throw
+  under their own spec: the `WebSocket` constructor (an invalid URL),
+  `send()` and `close()` (wrong state, an invalid close code). Their
+  bindings are declared with `#[wasm_bindgen(catch)]`, and an exception
+  goes through step 5's error conversion; `fetch` rejections already arrive
+  as `Err` through `JsFuture`. Built-ins replaced by the page with
+  functions that throw (`Math.random`, `Date.now`, `setTimeout`) are out of
+  scope, as for any library.
 - Tasks run on `spawn_local`, which needs a running JavaScript event loop;
   document that.
 - Initially tested browsers: Chrome and Firefox. Safari / WebKit is not
@@ -221,7 +229,9 @@ CI jobs must still build. Two parts:
   the native connector, doesn't exist on wasm;
 - the attempt check in `Net::connect()` calls `platform::check_attempt`.
 
-Expected interface, from the call sites found so far:
+Expected interface, from the call sites found so far. It is provisional:
+step 2's audit is a prerequisite, and the interface is fixed only once the
+audit is complete; anything it finds is added here first.
 
 ```rust
 // Tasks
@@ -346,11 +356,6 @@ pub(crate) fn random_seed() -> u64;
     entropy path, no `getrandom` and no `Crypto` binding; this is enough for
     jitter, which is not security-relevant. If the SDK ever needs
     cryptographic randomness on wasm, that needs its own decision.
-    `Math.random()` is part of JavaScript itself and can't throw. A value
-    outside `[0, 1)` (only possible if a script replaced it) still can't
-    break anything: Rust's `f64` to `u32` cast saturates, and NaN becomes 0,
-    so the worst case is the same seed for every client, which only makes
-    jitter less effective.
 - **Task handle: abort-only.** The driver only stores and aborts handles, so
   there is no awaitable `JoinHandle` and no completion channel. Extension
   point: if a call site ever needs a task's result, add a separate
@@ -626,7 +631,7 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 | Runtime | Abort a spawned task; abort a task while it awaits a timer (the timer is cleared); drop a task handle; shutdown with pending timers; `'static` futures on `spawn_local`; `callback_scope`: `in_callback(id)` true during each poll of the wrapped future, false in another task between polls, previous value restored after a poll and after a panic; nested scopes for two different clients |
 | Timers | Past deadline; zero-duration sleep; duration above `2^31 - 1` ms (with a fake clock or by testing the clamping logic directly); cancellation on drop; first interval tick immediate; delayed tick without a catch-up burst; a timer firing long after its deadline, as after a background tab resumes (fake clock: the deadline re-check completes it once, without a burst); `timeout` at the boundary (the wrapped future ready on the deadline poll wins); drop a `timeout` while the wrapped future is pending (both dropped, timer cleared) |
 | Time | `system_now()` conversion tested on its own, including invalid inputs (NaN, negative, too large) and an unrepresentable time (`checked_add` fails) returning `None`; each of the three callers with `None` (watchdog skips, `connected_since` stays `None`, seed still varies); `connected_since` is set; seeds differ between clients; the `Math.random()` to `u32` conversion at 0 and just below 1 |
-| WebSocket | Server close with a non-1000 code; subprotocol not accepted; the close-code mapping over every `u16` (a unit test, since browsers make synthetic codes hard to trigger on demand); the sequence `error` then `close(1006)` gives exactly one terminal event (`Failed`); `close` after an abort gives no second terminal event; abort before `open`; a late event after the session was replaced reaches nothing; handlers cleared after a normal close and after an abort (no "closure invoked after being dropped" error) |
+| WebSocket | Server close with a non-1000 code; subprotocol not accepted; the close-code mapping over every `u16` (a unit test, since browsers make synthetic codes hard to trigger on demand), plus the cases that can be triggered checked in both Chrome and Firefox: a server close with a code (`Frame`), the server dropping the TCP connection without a close frame (1006: `Eof`, or `Failed` if the browser fires `error` first; both reconnect, so the test records which one each browser gives and asserts exactly one terminal event), a refused connection (`error` then 1006, `Failed`), and a close frame without a code (1005, `Eof`); the sequence `error` then `close(1006)` gives exactly one terminal event (`Failed`); `close` after an abort gives no second terminal event; abort before `open`; a late event after the session was replaced reaches nothing; handlers cleared after a normal close and after an abort (no "closure invoked after being dropped" error) |
 | HTTP-stream | Non-2xx response; missing body; EOF with an incomplete frame; abort while waiting for the response headers; abort while waiting for a chunk; after each abort the request is cancelled in the browser (the server sees the connection close), not just forgotten by Rust |
 | Outbound | Close a session while a POST is in flight: the POST is aborted and its `send()` fails at once with `ClientDisconnected`; an old session's POST that completes after the new session opened doesn't affect it |
 | Callbacks | A callback calls `close()`; a callback's work starts another callback; a slow callback delays later events but loses or duplicates none |
@@ -644,7 +649,9 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   1. close the client inside the Worker and check the server sees a clean
      disconnect;
   2. call `worker.terminate()` with the client still running and check the
-     server sees the connection drop. Termination runs no Rust code, so no
+     server sees the connection drop: an eventual assertion polling the
+     server with a bounded timeout (for example 10 s), since the browser
+     closes the socket asynchronously. Termination runs no Rust code, so no
      `Drop` cleanup happens; the browser closes the Worker's sockets
      itself. The docs must not suggest otherwise.
 
