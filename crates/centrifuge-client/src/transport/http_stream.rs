@@ -259,7 +259,18 @@ async fn emulation_writer(ctx: Ctx, mut rx: mpsc::UnboundedReceiver<WriteReq>) {
             ctx.shared
                 .bytes_out
                 .fetch_add(body.len() as u64, Ordering::Relaxed);
-            match post(&ctx, &url, &mut sender, body).await {
+            // A closed session stops its request in flight, not after it ends or
+            // times out: the outcome is unknown, as for any write a disconnect
+            // interrupts, and nothing it reports could reach a newer session.
+            let outcome = tokio::select! {
+                biased;
+                _ = closing.wait_for(|c| *c) => {
+                    fail_calls(&ctx.shared, &mut reqs, &crate::Error::ClientDisconnected);
+                    return;
+                }
+                r = post(&ctx, &url, &mut sender, body) => r,
+            };
+            match outcome {
                 Ok(()) => {}
                 Err(PostError::Close(reason)) => {
                     // 404 (the session's node is gone), 5xx, a network error, a
