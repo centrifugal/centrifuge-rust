@@ -28,7 +28,9 @@ async fn connect_subscribe_publish_matrix() {
         sub.subscribe();
         assert_eq!(sub.state(), SubState::Subscribing);
         client.connect().unwrap();
-        assert_eq!(client.state(), State::Connecting);
+        // Connecting at once; the driver may already have connected (§9.3).
+        let st = client.state();
+        assert!(matches!(st, State::Connecting | State::Connected), "{st:?}");
         client.ready(Some(Duration::from_secs(5))).await.unwrap();
         sub.ready(Some(Duration::from_secs(5))).await.unwrap();
         assert_eq!(ev.wait("connected").await, format!("connected {kind:?}"));

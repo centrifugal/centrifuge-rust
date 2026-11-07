@@ -1070,7 +1070,7 @@ enum Input {
 - records its effect in the projected state
 - sends its op
 
-`state()` returns the projected state until the driver has applied the op. So `client.connect()?; client.state()` is `Connecting` at once, and `sub.unsubscribe(); sub.state()` is `Unsubscribed` at once, also inside a handler. That matches centrifuge-js, where such a call runs nested, though the op's *events* still come after the handler returns (§1.1).
+`state()` returns the projected state until the driver has applied the op, then the real state. So `client.connect()?; client.state()` is `Connecting` at once, and `sub.unsubscribe(); sub.state()` is `Unsubscribed` at once, also inside a handler. Outside a handler the driver runs concurrently and may already have moved on by the time `state()` is read: right after `connect()` it can already be `Connected`. It never shows the state from before the call. That matches centrifuge-js, where such a call runs nested, though the op's *events* still come after the handler returns (§1.1).
 
 Waiters (`ready()`, calls waiting for the connection) first wait until `applied_seq` has caught up with the `requested_seq` they saw, then judge the state. So `client.connect()?; client.ready(None).await` waits instead of failing at once, and a `publish()` right after `disconnect()` waits for the next connect instead of going out on the old connection (centrifuge-csharp C1/D2, centrifuge-js #427). Inside a handler, where catching up would wait for the handler itself, waiters judge the projected state, with the §9.5 `WouldDeadlock` rules.
 
