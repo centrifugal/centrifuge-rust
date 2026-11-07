@@ -335,10 +335,15 @@ async fn subscription_token_and_refresh() {
         .unwrap();
     sub.subscribe();
     client.connect().unwrap();
-    sub.ready(None).await.unwrap();
+    // Bounded, so a hang names its step (one was seen on macOS CI).
+    sub.ready(Some(Duration::from_secs(10)))
+        .await
+        .expect("subscribed");
     let r = srv.wait_for(|r| r.command.sub_refresh.is_some()).await;
     assert_eq!(r.command.sub_refresh.unwrap().token, "sub-token");
-    client.close().await;
+    tokio::time::timeout(Duration::from_secs(10), client.close())
+        .await
+        .expect("close() returns");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
