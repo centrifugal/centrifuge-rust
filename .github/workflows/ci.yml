@@ -104,7 +104,10 @@ jobs:
       - run: cargo test -p centrifuge-client --test real_server --locked
         env:
           CENTRIFUGO_TESTS: "1"
-      - if: failure()
+          # Captured per test: printed only for a failed one.
+          RUST_LOG: centrifuge=debug
+      # A job cancelled by its time limit is cancelled, not failed.
+      - if: failure() || cancelled()
         run: docker compose logs --tail 200
 
   msrv:

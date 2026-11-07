@@ -120,36 +120,41 @@ async fn wait_ready(
     let mut sub_rx = sub.map(|s| s.snapshot.subscribe());
     loop {
         {
-            let snap = rx.borrow_and_update();
+            // Copies, not held borrows: `state()` reads the same watches, and a
+            // second read lock deadlocks behind a waiting writer.
+            let (snap_state, applied, disconnects, has_session) = {
+                let s = rx.borrow_and_update();
+                (s.state, s.applied_seq, s.disconnects, s.session.is_some())
+            };
             // Closed is final: nothing after it is ever applied.
-            if snap.state == State::Closed {
+            if snap_state == State::Closed {
                 return Err(Error::ClientClosed);
             }
-            let caught_up = snap.applied_seq >= seq || nested;
+            let caught_up = applied >= seq || nested;
             if caught_up {
                 // The state as of this call (projected inside handlers).
-                let state = if nested { shared.state() } else { snap.state };
+                let state = if nested { shared.state() } else { snap_state };
                 if state == State::Closed {
                     return Err(Error::ClientClosed);
                 }
-                if snap.disconnects != start.0 && state != State::Connected {
+                if disconnects != start.0 && state != State::Connected {
                     return Err(Error::ClientDisconnected);
                 }
                 match sub {
                     None => {
-                        if state == State::Connected && snap.session.is_some() {
+                        if state == State::Connected && has_session {
                             return Ok(());
                         }
                     }
                     Some(s) => {
-                        let ss = s.snapshot.borrow();
+                        let ss = s.snapshot.borrow().clone();
                         let sub_state = if nested { s.state(shared) } else { ss.state };
                         if sub_state == SubState::Unsubscribed || Some(ss.unsubscribes) != start.1 {
                             return Err(Error::SubscriptionUnsubscribed);
                         }
                         if sub_state == SubState::Subscribed
                             && state == State::Connected
-                            && snap.session.is_some()
+                            && has_session
                         {
                             return Ok(());
                         }
@@ -277,20 +282,25 @@ pub(crate) async fn client_ready(shared: &Shared, timeout: Option<Duration>) -> 
     let fut = async {
         loop {
             {
-                let snap = rx.borrow_and_update();
+                // Copies, not a held borrow: `shared.state()` reads the same
+                // watch, and a second read lock deadlocks behind a waiting writer.
+                let (snap_state, applied, ready) = {
+                    let s = rx.borrow_and_update();
+                    (s.state, s.applied_seq, s.ready)
+                };
                 // Closed is final: nothing after it is ever applied.
-                if snap.state == State::Closed {
+                if snap_state == State::Closed {
                     return Err(Error::ClientClosed);
                 }
-                let state = if nested || snap.applied_seq < seq {
+                let state = if nested || applied < seq {
                     shared.state()
                 } else {
-                    snap.state
+                    snap_state
                 };
                 match state {
                     State::Closed => return Err(Error::ClientClosed),
                     State::Disconnected => return Err(Error::ClientDisconnected),
-                    State::Connected if snap.ready && snap.applied_seq >= seq => return Ok(()),
+                    State::Connected if ready && applied >= seq => return Ok(()),
                     _ if nested => return Err(Error::WouldDeadlock),
                     _ => {}
                 }
@@ -327,7 +337,9 @@ pub(crate) async fn sub_ready(
             {
                 let applied = rx.borrow_and_update().applied_seq;
                 let client_state = rx.borrow().state;
-                let ss = srx.borrow_and_update();
+                // A copy, not a held borrow: `sub.state()` reads the same watch,
+                // and a second read lock deadlocks behind a waiting writer.
+                let ss = srx.borrow_and_update().clone();
                 let state = if nested || applied < seq {
                     sub.state(shared)
                 } else {
