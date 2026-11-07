@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "centrifuge-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "centrifuge-client-core",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "centrifuge-client-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "centrifuge-fake-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "centrifuge-client-core",

@@ -4,6 +4,8 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+## [0.1.1]
+
 ### Added
 
 - `centrifuge::android` (Android only): `init_with_env`, `init_with_refs` and `init_with_runtime` set up the TLS platform verifier through the client's own copy of rustls-platform-verifier, so the app can't initialise a different version by mistake. Without the setup, `build()` fails with `Error::Configuration` when an endpoint uses TLS, instead of the verifier panicking on the first connection. Exempt from semver: the signatures use `jni` types, re-exported as `centrifuge::android::jni` (docs/spec.md §5.2). An app that sets up rustls-platform-verifier directly, as the earlier docs on `main` said, or through another library, also calls the wrapper once; it's a no-op then, and without it `build()` refuses TLS endpoints.
@@ -12,6 +14,7 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 - `ready()` and `sub.ready()` awaited right after `connect()` or `subscribe()`, and calls made from event handlers, could deadlock the calling thread: they read a state snapshot twice under one held borrow, and a snapshot update arriving between the two reads blocked both sides. Rare (about one in a few hundred test runs), and no timeout could end it, since the thread was blocked rather than waiting.
 - `build()` fails with `Error::Configuration` when the `EventDelivery::Thread` event thread can't be started. Before, the client ran but silently delivered no events at all. If the event thread stops later (an SDK bug), the client now stops loudly as on a handler panic, with an `error` event and `disconnected`, and the events it didn't deliver aren't committed, so recovery delivers them again. Before, it kept running, dropped every event and advanced positions past them. Later events are delivered on the client's task (docs/spec.md §9.4).
+- HTTP-streaming: closing a session now stops an emulation request already in flight. Before, `send()` and other calls could wait until that request ended or hit its timeout after `disconnect()`, and the request kept its connection open. Now they fail with `ClientDisconnected` right away.
 - `centrifuge-client` builds for Android. The platform verifier there takes no extra roots, so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` on Android instead of dropping them (docs/spec.md §5.2). Android and iOS are now built in CI.
 
 ## [0.1.0]
