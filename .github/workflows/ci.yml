@@ -55,6 +55,8 @@ jobs:
   test:
     name: test (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +87,8 @@ jobs:
   real-server:
     name: real server (Centrifugo)
     runs-on: ubuntu-latest
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,6 +128,8 @@ jobs:
   features:
     name: feature combinations
     runs-on: ubuntu-latest
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,6 +187,8 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write # Codecov upload via OIDC, no token secret.
