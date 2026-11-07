@@ -2,6 +2,30 @@
 
 Status: proposal. Nothing here is implemented yet.
 
+## Summary
+
+- **One client, not two.** Protocol, reconnects, subscriptions, recovery and
+  the driver stay shared. Only two layers differ by target: an internal
+  `rt` module (tasks, timers, clocks, the callback marker: tokio on native,
+  the browser event loop on wasm) and the transports (browser `WebSocket`
+  and `fetch` behind the existing internal trait).
+- **No tokio runtime in the browser**: only `tokio::sync` and `select!`.
+- **Native API and behavior unchanged.** The wasm differences: `Inline`
+  event delivery by default, `close()` without `Send`, no `runtime()`.
+- **Platform checks in one `platform` module**: what can never work fails
+  at `build()`; what can become true later is checked per attempt and
+  retried.
+- **Browser cleanup on drop**: a closed session aborts its `fetch`es and
+  POSTs and detaches its WebSocket handlers.
+- **Centrifugal semantics unchanged**: close codes, reconnect rules and call
+  failures go through the shared core.
+- **Order**: build baseline and audit, then `rt` and `platform` with native
+  unchanged, then WebSocket (with a real-browser test), HTTP-streaming, the
+  API, full tests, docs.
+- **Open until implemented**: the full runtime audit (the `rt` interface is
+  provisional until then), binary size (estimated, measured in step 9),
+  Safari (not claimed until tested).
+
 ## Goal
 
 Run `centrifuge-client` on `wasm32-unknown-unknown` with both transports
