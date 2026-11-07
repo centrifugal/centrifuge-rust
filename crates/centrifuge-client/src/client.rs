@@ -203,7 +203,8 @@ impl Client {
     }
 
     /// The client state, including the effect of operations called just
-    /// before (`connect()` then `state()` gives `Connecting`).
+    /// before: `connect()` then `state()` gives `Connecting`, or a later state
+    /// if the client has already moved on (`Connected`).
     #[must_use]
     pub fn state(&self) -> State {
         self.inner.shared.state()
