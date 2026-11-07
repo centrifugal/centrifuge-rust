@@ -4,7 +4,8 @@
     unreachable_pub,
     unused_imports,
     clippy::expect_used,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    clippy::panic
 )]
 
 use std::time::Duration;
@@ -83,12 +84,20 @@ impl Events {
     /// Waits for an event starting with `prefix`, returning it; earlier ones
     /// are skipped.
     pub async fn wait(&mut self, prefix: &str) -> String {
-        loop {
-            let e = self.next().await;
-            if e.starts_with(prefix) {
-                return e;
+        // Bounded as a whole, not only per event: a client in a reconnect loop
+        // keeps sending events and would otherwise hold the test forever.
+        let mut skipped = Vec::new();
+        let found = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let e = self.next().await;
+                if e.starts_with(prefix) {
+                    return e;
+                }
+                skipped.push(e);
             }
-        }
+        })
+        .await;
+        found.unwrap_or_else(|_| panic!("no {prefix:?} event within 15 s; skipped: {skipped:?}"))
     }
 
     /// Everything received so far, without waiting.

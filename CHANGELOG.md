@@ -10,6 +10,7 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ### Fixed
 
+- `ready()` and `sub.ready()` awaited right after `connect()` or `subscribe()`, and calls made from event handlers, could deadlock the calling thread: they read a state snapshot twice under one held borrow, and a snapshot update arriving between the two reads blocked both sides. Rare (about one in a few hundred test runs), and no timeout could end it, since the thread was blocked rather than waiting.
 - `build()` fails with `Error::Configuration` when the `EventDelivery::Thread` event thread can't be started. Before, the client ran but silently delivered no events at all. If the event thread stops later (an SDK bug), the client now stops loudly as on a handler panic, with an `error` event and `disconnected`, and the events it didn't deliver aren't committed, so recovery delivers them again. Before, it kept running, dropped every event and advanced positions past them. Later events are delivered on the client's task (docs/spec.md §9.4).
 - `centrifuge-client` builds for Android. The platform verifier there takes no extra roots, so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` on Android instead of dropping them (docs/spec.md §5.2). Android and iOS are now built in CI.
 

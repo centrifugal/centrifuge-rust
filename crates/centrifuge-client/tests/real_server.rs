@@ -57,7 +57,9 @@ fn unique(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{prefix}{n}")
+    // The pid too: concurrent test processes share the server, and a coarse
+    // clock (microseconds on macOS) can give them the same time.
+    format!("{prefix}{}_{n}", std::process::id())
 }
 
 fn b64url(data: &[u8]) -> String {
@@ -95,6 +97,12 @@ fn now() -> u64 {
 
 /// Server API call (plain HTTP/1.1, no client library needed).
 async fn api(host: &str, method: &str, body: serde_json::Value) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(10), api_call(host, method, body))
+        .await
+        .expect("the server API answers")
+}
+
+async fn api_call(host: &str, method: &str, body: serde_json::Value) -> serde_json::Value {
     let body = body.to_string();
     let mut s = tokio::net::TcpStream::connect(host).await.unwrap();
     let req = format!(
@@ -106,6 +114,13 @@ async fn api(host: &str, method: &str, body: serde_json::Value) -> serde_json::V
     s.read_to_string(&mut resp).await.unwrap();
     let json = resp.split("\r\n\r\n").nth(1).unwrap_or_default();
     serde_json::from_str(json).unwrap_or(serde_json::Value::Null)
+}
+
+/// `close()` within 10 s: a hang fails here, with the captured log.
+async fn close(client: &Client) {
+    tokio::time::timeout(Duration::from_secs(10), client.close())
+        .await
+        .expect("close() returns");
 }
 
 async fn api_publish(channel: &str, data: serde_json::Value) {
@@ -158,7 +173,7 @@ async fn real_basic_matrix() {
         assert_eq!(s2.presence_stats().await.unwrap().num_users, 1);
         let rpc = client.rpc("missing", "{}").await;
         assert!(matches!(rpc, Err(centrifuge::Error::Server(_))), "{rpc:?}");
-        client.close().await;
+        close(&client).await;
     }
 }
 
@@ -214,7 +229,7 @@ async fn real_recovery_after_disconnect() {
             }
             assert!(seen.len() < 3, "{seen:?}");
         }
-        client.close().await;
+        close(&client).await;
     }
 }
 
@@ -247,7 +262,7 @@ async fn real_delta() {
             let got: serde_json::Value = serde_json::from_str(data).unwrap();
             assert_eq!(got, v, "{kind:?} {protocol:?}");
         }
-        client.close().await;
+        close(&client).await;
     }
 }
 
@@ -283,7 +298,7 @@ async fn real_tags_filter() {
     // The namespace keeps history, so publications carry offsets.
     assert_eq!(ev.wait("pub").await, "pub 2 1");
     assert_eq!(ev.wait("pub").await, "pub 4 3");
-    client.close().await;
+    close(&client).await;
 }
 
 /// Connection token with a short expiry: refreshed through `get_token`; a
@@ -329,7 +344,7 @@ async fn real_tokens() {
         assert_eq!(client.state(), State::Connected);
         assert_eq!(client.statistics().connects, 1, "{:?}", ev.drain());
         sub.publish(r#"{"ok":true}"#).await.unwrap();
-        client.close().await;
+        close(&client).await;
 
         // An invalid token: the server disconnects for good.
         let (r, mut ev) = recorder();
@@ -421,7 +436,7 @@ async fn real_pro_channel_compaction() {
         assert_eq!(ev.wait("pub").await, r#"pub 3 {"n":3}"#);
         publish(4).await;
         assert_eq!(ev.wait("pub").await, r#"pub 4 {"n":4}"#);
-        client.close().await;
+        close(&client).await;
         let wire = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
         assert!(
             wire.contains(r#""push":{"id":"#),
