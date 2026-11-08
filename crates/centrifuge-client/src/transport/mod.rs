@@ -3,6 +3,8 @@
 //! a writer task; the driver only sees [`Inbound`] messages.
 
 mod browser_error;
+#[cfg(feature = "http-stream")]
+mod http_common;
 #[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
 mod http_stream;
 #[cfg(not(target_arch = "wasm32"))]

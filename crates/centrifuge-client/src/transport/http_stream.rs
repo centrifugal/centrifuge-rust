@@ -2,10 +2,9 @@
 //! with centrifuge-js and centrifuge-csharp.
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use bytes::Bytes;
-use centrifuge_client_core::codec::{self, Protocol, StreamDecoder};
+use centrifuge_client_core::codec::{self, StreamDecoder};
 use centrifuge_client_core::machine::CloseReason;
 use centrifuge_client_core::proto;
 use http_body_util::{BodyExt as _, Full};
@@ -14,16 +13,10 @@ use hyper_util::rt::TokioIo;
 use tokio::sync::mpsc;
 use url::Url;
 
-use super::{Ctx, Inbound, WriteReq, drain, encode_frames, fail_calls, mark_sent};
-use crate::shared::CALL_ID_BASE;
-
-fn content_type(protocol: Protocol) -> &'static str {
-    if protocol == Protocol::Protobuf {
-        "application/octet-stream"
-    } else {
-        "application/json"
-    }
-}
+use super::http_common::{
+    PostError, Poster, content_type, emulation_writer, post_status, stream_response,
+};
+use super::{Ctx, Inbound};
 
 fn failed(status: Option<u16>, message: impl Into<String>) -> CloseReason {
     CloseReason::Failed {
@@ -122,30 +115,20 @@ pub(super) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
             return;
         }
     };
-    let status = resp.status().as_u16();
-    if !resp.status().is_success() {
-        ctx.closed(failed(
-            Some(status),
-            format!("HTTP-stream request answered with status {status}"),
-        ))
-        .await;
-        return;
-    }
-    // A captive portal answers 200 with HTML: a transport failure (§5.3).
-    let html = resp
+    let content_type = resp
         .headers()
         .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("text/html"));
-    if html {
-        ctx.closed(CloseReason::Undecodable(codec::DecodeError::Json(
-            "HTML response to an HTTP-stream request".into(),
-        )))
-        .await;
+        .and_then(|v| v.to_str().ok());
+    if let Err(reason) = stream_response(resp.status().as_u16(), content_type) {
+        ctx.closed(reason).await;
         return;
     }
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(emulation_writer(ctx.clone(), rx));
+    tokio::spawn(emulation_writer(
+        ctx.clone(),
+        rx,
+        HyperPoster { sender: None },
+    ));
     ctx.report(Inbound::Opened {
         transport: ctx.id,
         writer: tx,
@@ -191,129 +174,15 @@ pub(super) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
     }
 }
 
-fn emulation_url(ctx: &Ctx) -> Url {
-    if let Some(u) = &ctx.emulation_endpoint {
-        return u.clone();
-    }
-    let mut u = ctx.url.clone();
-    u.set_path("/emulation");
-    u.set_query(None);
-    u
+/// Emulation requests over one kept-alive HTTP/1.1 connection, reopened when
+/// the server closes it.
+struct HyperPoster {
+    sender: Option<http1::SendRequest<Full<Bytes>>>,
 }
 
-/// Posts commands one request at a time, in order, each with a deadline
-/// (pattern 83).
-async fn emulation_writer(ctx: Ctx, mut rx: mpsc::UnboundedReceiver<WriteReq>) {
-    let url = emulation_url(&ctx);
-    let mut sender: Option<http1::SendRequest<Full<Bytes>>> = None;
-    let mut closing = ctx.closing.clone();
-    loop {
-        let first = tokio::select! {
-            biased;
-            r = rx.recv() => match r {
-                Some(r) => r,
-                None => return,
-            },
-            _ = closing.wait_for(|c| *c) => return,
-        };
-        let mut reqs = drain(first, &mut rx);
-        let emu = reqs.iter().find_map(|r| r.emu.clone());
-        let cmds: Vec<_> = reqs
-            .iter_mut()
-            .flat_map(|r| std::mem::take(&mut r.cmds))
-            .collect();
-        let core_ids: Vec<u32> = cmds
-            .iter()
-            .map(|c| c.id)
-            .filter(|id| *id > 0 && *id < CALL_ID_BASE)
-            .collect();
-        let had_pong = cmds.iter().any(|c| *c == proto::Command::default());
-        let Some((session, node)) = emu else {
-            fail_calls(&ctx.shared, &mut reqs, &crate::Error::ClientDisconnected);
-            continue;
-        };
-        let frames = match encode_frames(ctx.protocol, &cmds) {
-            Ok(f) => f,
-            Err(e) => {
-                fail_calls(
-                    &ctx.shared,
-                    &mut reqs,
-                    &crate::Error::InvalidData(e.to_string()),
-                );
-                continue;
-            }
-        };
-        for frame in frames {
-            let body = match codec::encode_emulation_request(ctx.protocol, &node, &session, &frame)
-            {
-                Ok(b) => b,
-                Err(e) => {
-                    fail_calls(
-                        &ctx.shared,
-                        &mut reqs,
-                        &crate::Error::InvalidData(e.to_string()),
-                    );
-                    continue;
-                }
-            };
-            ctx.shared
-                .bytes_out
-                .fetch_add(body.len() as u64, Ordering::Relaxed);
-            // A closed session stops its request in flight, not after it ends or
-            // times out: the outcome is unknown, as for any write a disconnect
-            // interrupts, and nothing it reports could reach a newer session.
-            let outcome = tokio::select! {
-                biased;
-                _ = closing.wait_for(|c| *c) => {
-                    fail_calls(&ctx.shared, &mut reqs, &crate::Error::ClientDisconnected);
-                    return;
-                }
-                r = post(&ctx, &url, &mut sender, body) => r,
-            };
-            match outcome {
-                Ok(()) => {}
-                Err(PostError::Close(reason)) => {
-                    // 404 (the session's node is gone), 5xx, a network error, a
-                    // hang: the outcome is unknown, so close and reconnect (§5.7).
-                    fail_calls(&ctx.shared, &mut reqs, &crate::Error::ClientDisconnected);
-                    ctx.closed(reason).await;
-                    return;
-                }
-                Err(PostError::Rejected(status)) => {
-                    // E.g. 413: only this request's commands fail.
-                    fail_calls(
-                        &ctx.shared,
-                        &mut reqs,
-                        &crate::Error::Transport {
-                            status: Some(status),
-                            message: format!("emulation request rejected with status {status}"),
-                        },
-                    );
-                    ctx.report(Inbound::WriteFailed {
-                        transport: ctx.id,
-                        command_ids: core_ids.clone(),
-                        had_pong,
-                    })
-                    .await;
-                }
-            }
-        }
-        mark_sent(&mut reqs);
-    }
-}
-
-enum PostError {
-    Close(CloseReason),
-    Rejected(u16),
-}
-
-async fn post(
-    ctx: &Ctx,
-    url: &Url,
-    sender: &mut Option<http1::SendRequest<Full<Bytes>>>,
-    body: Vec<u8>,
-) -> Result<(), PostError> {
-    let attempt = async {
+impl Poster for HyperPoster {
+    async fn post(&mut self, ctx: &Ctx, url: &Url, body: Vec<u8>) -> Result<(), PostError> {
+        let sender = &mut self.sender;
         if sender.as_ref().is_none_or(http1::SendRequest::is_closed) {
             *sender = Some(http1_sender(ctx, url).await.map_err(PostError::Close)?);
         }
@@ -333,35 +202,6 @@ async fn post(
         let _ = http_body_util::Limited::new(resp.into_body(), 64 * 1024)
             .collect()
             .await;
-        if resp_ok(status) {
-            Ok(())
-        } else if status == 404
-            || status == 401
-            || status == 403
-            || (300..400).contains(&status)
-            || status >= 500
-        {
-            Err(PostError::Close(failed(
-                Some(status),
-                format!("emulation request answered with status {status}"),
-            )))
-        } else {
-            Err(PostError::Rejected(status))
-        }
-    };
-    // A late timer gets the same grace as call timers (§9.7).
-    match tokio::time::timeout(ctx.timeout, attempt).await {
-        Ok(r) => r,
-        Err(_) => Err(PostError::Close(failed(
-            None,
-            "emulation request timed out",
-        ))),
+        post_status(status)
     }
 }
-
-fn resp_ok(status: u16) -> bool {
-    (200..300).contains(&status)
-}
-
-#[allow(dead_code)]
-const _: Duration = Duration::ZERO;
