@@ -179,9 +179,9 @@ use tauri::{Emitter as _, Manager as _};
 
 [`examples/desktop_app.rs`](crates/centrifuge-client/examples/desktop_app.rs) shows the same patterns without a GUI dependency.
 
-### Browsers (wasm32)
+### In the browser
 
-The same client builds for `wasm32-unknown-unknown` and runs in a browser page or a Dedicated Worker, over the browser's `WebSocket` and `fetch` (HTTP-streaming), with the same API and behavior. Build it as any `wasm-bindgen` app; nothing to set up:
+The same client works in the browser, compiled to WebAssembly: in a page or in a Web Worker, over WebSocket or HTTP-streaming. The API is the same, so the code you write for the desktop works there too:
 
 ```rust
 let client = centrifuge::Client::builder("wss://example.com/connection/websocket")
@@ -191,13 +191,16 @@ let client = centrifuge::Client::builder("wss://example.com/connection/websocket
 client.connect()?;
 ```
 
-- **Handlers run on the page's event loop** (`EventDelivery::Inline`, the default there): they needn't be `Send`, but a slow one delays messages, timers and the page. `EventDelivery::Thread` isn't available.
-- **What the browser decides is refused at `build()`:** an explicit `proxy()`, `tls()` and `http_headers()` (use `emulated_headers()`). `runtime()` and `TlsConfig::rustls_client_config` don't exist there.
-- **The server must allow the page's origin:** Centrifugo's `client.allowed_origins` for WebSocket (otherwise it answers 403 and the client keeps reconnecting), and CORS for HTTP-streaming from another origin.
-- **Authentication:** a token (`token` / `get_token`) works the same over both transports. Cookies: a browser `WebSocket` always sends them, `fetch` only as `credentials()` says (same-origin by default), so a cookie-authenticated app on another origin needs `Credentials::Include` for HTTP-streaming, and a server that allows credentials.
-- **Network and back/forward cache:** as in centrifuge-js, `offline` closes the connection and `online` reconnects at once; a page entering the back/forward cache disconnects (the server sees it at once) and reconnects when restored.
-- **Size:** about 200–250 KB gzipped after `wasm-opt -Oz`. Most of `url`'s share is its Unicode domain-name tables: an app that only connects to ASCII hosts can pin `idna_adapter = "=1.0.0"` in its own `Cargo.toml` for about 46 KB less.
-- Tested in Chrome and Firefox (CI, against a real Centrifugo), in a page and in a Dedicated Worker. Safari isn't tested yet; Service Workers aren't supported (the browser stops them when idle).
+A few things work differently, because the browser is in charge:
+
+- **Keep handlers quick.** They run on the page's own thread, so a slow handler makes the page and the connection lag.
+- **No proxy, TLS or custom HTTP header settings.** The browser handles these itself, and setting them is an error. To pass headers to Centrifugo, use `emulated_headers()`.
+- **Allow your site on the server.** Add your page's origin to Centrifugo's `client.allowed_origins`, or the connection is refused. If the page and Centrifugo are on different domains, HTTP-streaming also needs CORS.
+- **Prefer a token for authentication.** A token works the same over both transports. If you rely on cookies and Centrifugo is on another domain, set `credentials(Credentials::Include)`, or HTTP-streaming won't send them.
+- **Network changes are handled for you.** The client reconnects as soon as the device is back online, and disconnects cleanly when the user navigates away from the page.
+- **Size.** About 200–250 KB gzipped. If you only connect to plain ASCII host names, add `idna_adapter = "=1.0.0"` to your app's dependencies to save about 46 KB.
+
+Tested in Chrome and Firefox. Safari hasn't been tested yet, and Service Workers aren't supported.
 
 ## Cargo features
 
@@ -217,7 +220,7 @@ client.connect()?;
 
 - **Protocol:** the Centrifugo client protocol v2 (Centrifugo v4 and newer). HTTP-streaming needs Centrifugo v5 or newer with `http_stream` enabled. Tested against Centrifugo v6.10.
 - **Runtime:** Tokio (multi-thread or current-thread).
-- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). Browsers (`wasm32-unknown-unknown`): Chrome and Firefox, tested in CI (see [Browsers](#browsers-wasm32)).
+- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). Browsers (`wasm32-unknown-unknown`): Chrome and Firefox, tested in CI (see [In the browser](#in-the-browser)).
 - **MSRV:** Rust 1.85. Raising it is a minor-version change, noted in the [changelog](CHANGELOG.md).
 
 ## Differences from centrifuge-js
