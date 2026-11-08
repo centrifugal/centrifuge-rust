@@ -30,7 +30,6 @@ pub(crate) struct BuildCheck<'a> {
     pub(crate) tls_set: bool,
     /// Non-empty `http_headers`.
     pub(crate) http_headers: bool,
-    pub(crate) credentials: bool,
     pub(crate) event_delivery: EventDelivery,
 }
 
@@ -48,24 +47,12 @@ pub(crate) fn check_build(c: &BuildCheck<'_>) -> Result<(), Error> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        native_check_build(c)?;
         #[cfg(target_os = "android")]
         android::check_build(c, crate::android::initialized())?;
+        #[cfg(not(target_os = "android"))]
+        let _ = c;
         Ok(())
     }
-}
-
-/// Options that only a browser serves.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn native_check_build(c: &BuildCheck<'_>) -> Result<(), Error> {
-    if c.credentials {
-        return Err(Error::Configuration(
-            "credentials() is for browsers (wasm32): fetch's credentials mode; \
-             remove it on this target"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// `Client::set_proxy`: in a browser only `ProxyConfig::System`, which
@@ -257,7 +244,7 @@ mod android {
 mod tests {
     use super::{
         BuildCheck, EventDelivery, ProxyConfig, TlsConfig, TransportKind, Url, android, browser,
-        configured_tls, native_check_build,
+        configured_tls,
     };
 
     fn check<'a>(
@@ -274,7 +261,6 @@ mod tests {
             proxy_set: false,
             tls_set: false,
             http_headers: false,
-            credentials: false,
             event_delivery: EventDelivery::Inline,
         }
     }
@@ -460,19 +446,5 @@ mod tests {
                 .to_string();
             assert!(err.contains(&format!("no `{missing}`")), "{err}");
         }
-    }
-
-    #[test]
-    fn credentials_are_browser_only() {
-        let ws = [ep(TransportKind::WebSocket, "ws://h/c")];
-        let (p, t) = (ProxyConfig::System, TlsConfig::new());
-        assert!(native_check_build(&check(&ws, None, &p, &t)).is_ok());
-        let err = native_check_build(&BuildCheck {
-            credentials: true,
-            ..check(&ws, None, &p, &t)
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("for browsers"), "{err}");
     }
 }

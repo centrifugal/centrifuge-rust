@@ -827,8 +827,12 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   whether `proxy()` / `tls()` were called; `set_proxy` refuses anything but
   `ProxyConfig::System` in a browser.
 - `ClientBuilder::credentials(Credentials)` (`SameOrigin`, the default;
-  `Include`; `Omit`) sets `fetch`'s mode. Following decision 6, setting it
-  on another target fails `build()`.
+  `Include`; `Omit`) sets `fetch`'s mode. It has no effect on other
+  targets. That isn't an exception to decision 6, which keeps an app from
+  silently losing something it would observe (a proxy route, a trust root,
+  headers): a native client sends no ambient credentials, so every value
+  means the same there and nothing is lost. Refusing it would only force a
+  `cfg` into cross-platform code.
 - The native futures' `Send` contract is asserted at compile time; a
   browser test uses handlers that capture an `Rc` with the default
   settings, and awaits `close()` holding one.

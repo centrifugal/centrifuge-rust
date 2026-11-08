@@ -81,9 +81,10 @@ impl Default for EventDelivery {
 }
 
 /// Whether a browser's HTTP-streaming requests carry cookies and HTTP
-/// authentication (the `fetch` `credentials` mode). Browser only (`wasm32`):
-/// set on another target, [`ClientBuilder::build`](crate::ClientBuilder::build)
-/// fails.
+/// authentication (the `fetch` `credentials` mode). Browser only (`wasm32`);
+/// no effect on other targets, which send no ambient credentials (set
+/// headers with [`ClientBuilder::http_headers`](crate::ClientBuilder::http_headers)
+/// there).
 ///
 /// A browser `WebSocket` always sends the target's cookies; `fetch` sends them
 /// as this says. So a cookie-authenticated app on another origin than the

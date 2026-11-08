@@ -651,6 +651,11 @@ pub struct ClientBuilder {
     /// can't serve fails `build()`, while the default is best effort.
     tls_set: bool,
     proxy_set: bool,
+    // Only the browser's `fetch` reads it.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", feature = "http-stream")),
+        allow(dead_code)
+    )]
     credentials: Option<Credentials>,
     event_delivery: EventDelivery,
     handlers: ClientHandlers,
@@ -842,8 +847,9 @@ impl ClientBuilder {
     }
 
     /// The browser `fetch` credentials mode for HTTP-streaming. Default:
-    /// [`Credentials::SameOrigin`]. Browser only: setting it on another target
-    /// fails `build()`.
+    /// [`Credentials::SameOrigin`]. Browser only: other targets have no
+    /// ambient credentials for it to include or omit, so it has no effect
+    /// there, and cross-platform code can set it unconditionally.
     pub fn credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(credentials);
         self
@@ -965,7 +971,6 @@ impl ClientBuilder {
             proxy_set: self.proxy_set,
             tls_set: self.tls_set,
             http_headers: !self.http_headers.is_empty(),
-            credentials: self.credentials.is_some(),
             event_delivery: self.event_delivery,
         })?;
         let net = Arc::new(Net::new(self.proxy, &self.tls, self.handshake_timeout)?);
