@@ -23,8 +23,7 @@ Status: proposal. Nothing here is implemented yet.
 - **Order**: build baseline and audit, then `rt` and `platform` with native
   unchanged, then WebSocket (with a real-browser test), HTTP-streaming, the
   API, full tests, docs.
-- **Open until implemented**: the full runtime audit (the `rt` interface is
-  provisional until then), binary size (estimated, measured in step 9),
+- **Open until implemented**: binary size (estimated, measured in step 9),
   Safari (not claimed until tested).
 
 ## Goal
@@ -70,23 +69,40 @@ and `TlsConfig::rustls_client_config`, step 8).
   `Error::Configuration`. Before, the client ran and silently delivered no
   events.
 
-### Runtime and time usage found so far (a sample, not the full audit)
+### Runtime and time usage (full audit, step 2)
 
-The table names the kinds of use, not every call site. A rough grep finds about
-60 matches in 10 files, tests included, which is more than the table's rows
-suggest. Step 2 replaces this table with the full list.
+Every call site in the client's library code (tests excluded), and the core's
+time API.
 
-| Use | Where | Wasm note |
+| Use | Call sites | On wasm |
 |---|---|---|
-| `tokio::spawn` | `driver.rs` (4), `transport/ws.rs`, `transport/http_stream.rs` (2) | goes through `rt::spawn` |
-| `tokio::runtime::Handle` | `ClientBuilder.runtime`, `Dispatcher::new` | does not exist on wasm; the dispatcher must spawn through `rt` |
-| `JoinHandle` / `AbortHandle` | `driver.rs`: stored and only `.abort()`-ed, never awaited | an abort-only handle is enough |
-| `tokio::time::{Instant, sleep_until, timeout, timeout_at, interval}` + `MissedTickBehavior::Delay` | driver, calls | `rt` must provide these, including deadline forms |
-| `std::time::Instant::now()` | `driver.rs` (clock-jump watchdog) | panics on wasm |
-| `SystemTime::now()` | `driver.rs` (watchdog, `connected_since`), `client.rs` (`random_seed`) | panics on wasm |
-| `SystemTime` in the **public** API | `Statistics::connected_since: Option<SystemTime>` | type must stay `std::time::SystemTime` |
-| `tokio::task_local!` (`IN_CALLBACK`, §9.5) | declared in `dispatch.rs`; `IN_CALLBACK.scope(..)` wraps the token and state callbacks the driver spawns (`driver.rs`, 3 sites); read by `in_callback()` in `calls.rs` | the only symbol that needs tokio's `rt` feature; `rt` provides a task-local instead (step 3) |
-| `std::thread::Builder::spawn` | `dispatch.rs` (the `EventDelivery::Thread` event thread; the only thread the SDK spawns) | always fails on wasm; `Inline` is the wasm default (decision 8) |
+| `tokio::spawn` | `driver.rs`: the transport task (476) and the three callback tasks (509, 530, 543) | `rt::spawn` |
+| `JoinHandle` / `AbortHandle` | `driver.rs`: `TransportHandle::task` (63), `tasks` (88); only `.abort()`-ed (492, 570), never awaited | abort-only handle |
+| `tokio::runtime::Handle` | `client.rs`: builder field (630), `runtime()` (695), `try_current()` in `build()` (882); `dispatch.rs`: `Dispatcher::new` / `with_spawn` (613, 621), entered by the event thread | native-only: the thread variant isn't built on wasm |
+| `std::thread::Builder::spawn` | `dispatch.rs`: the event thread (565–580) | native-only (decision 8) |
+| `tokio::task_local!` | `dispatch.rs`: `IN_CALLBACK` (34), read by `in_callback()` (46); `.scope(..)` in `driver.rs` (509, 530, 543) | `rt::callback_scope` / `rt::in_callback` |
+| `tokio::time::{Instant, sleep_until, timeout, timeout_at}` | `calls.rs`: call deadlines (108, 193, 229–239, 252, 266), `ready()` / `sub.ready()` timeouts (314, 368) | `rt` |
+| `tokio::time::{interval, Interval, MissedTickBehavior::Delay}`, `sleep_until` | `driver.rs`: the 2 s watchdog (155–156, 179), the core's next deadline (184) | `rt` |
+| `std::time::Instant` | `driver.rs`: `now()` for the core (150–151), the watchdog's monotonic half (83, 142, 271); `transport/mod.rs`: `LastReceived` (118, 125, 137) | `rt::Instant` (`now()` panics on wasm) |
+| `std::time::Instant` in the **core's** API | `centrifuge-client-core`: `Core::step(input, now)`, `next_deadline()`, `last_received`, the timer wheel; the core itself only calls `now()` in tests | `centrifuge_client_core::time::Instant`: `std::time::Instant` on native, `web_time::Instant` on wasm (step 3) |
+| `SystemTime::now()` | `driver.rs`: watchdog (142, 271), `connected_since` (429); `client.rs`: `random_seed` (1000) | `rt::system_now()` |
+| `SystemTime` in the **public** API | `Statistics::connected_since` (`stats.rs`), `Shared::connected_since` | stays `std::time::SystemTime` |
+| `RandomState` | `client.rs`: `random_seed` (998) | not randomly seeded on wasm: `rt::random_seed()` |
+
+`Send` requirements beyond those of `tokio::spawn`:
+
+| Where | What | On wasm |
+|---|---|---|
+| `dispatch.rs:63` | handler storage `H<T, E> = Option<Box<dyn FnMut(&T, E) + Send>>` | `+ Send` per target: a `dyn` type can't name `MaybeSend` |
+| `driver.rs:29–46` | `TokenFuture`, `SubTokenFuture`, `StateFuture` (`+ Send`) and their getters (`+ Send + Sync`) | the same |
+| `dispatch.rs:565–580` | the event thread's `Box<dyn FnOnce() + Send>` | native-only with the thread |
+| `client.rs:187` | `close()` returns `impl Future + Send` | two signatures (step 8) |
+| `error.rs` | `BoxError`, `ArcError`, `From<E: Error + Send + Sync>` for `TokenError` | unchanged: public types, and errors are plain data. A browser error (`JsValue`) is converted to a message first |
+
+No `select!` holds a non-`Send` value across an `.await` once the aliases
+above are per target: on wasm nothing requires `Send` (`spawn_local`).
+`std::sync` locks, `catch_unwind` and `thread_local!` (`HandlerScope`) are
+available on wasm unchanged.
 
 ## Supported environments
 
@@ -269,6 +285,10 @@ Replace the sample table above with the full list of call sites. Cover:
   wasm32-unknown-unknown `RandomState` is not randomly seeded, so the wasm
   build needs another source.
 
+**Result (done):** the table under "Runtime and time usage". Beyond the
+sample: the core's `Instant` API, `LastReceived`'s clock, and the `Send`-only
+`dyn` aliases.
+
 Only what this audit finds goes into `rt`. `tokio::sync` stays unchanged at
 first; its implementations are available on wasm, but each composition still
 has to meet the target's `Send` constraints.
@@ -283,9 +303,15 @@ CI jobs must still build. Two parts:
   the native connector, doesn't exist on wasm;
 - the attempt check in `Net::connect()` calls `platform::check_attempt`.
 
-Expected interface, from the call sites found so far. It is provisional:
-step 2's audit is a prerequisite, and the interface is fixed only once the
-audit is complete; anything it finds is added here first.
+Then the core's clock type: `centrifuge-client-core` names its `Instant`
+through one alias, `std::time::Instant` on native and `web_time::Instant` on
+wasm (a target-specific dependency). On native `web_time::Instant` is
+`std::time::Instant` re-exported, so nothing changes there; on wasm the
+client can produce one, which it can't for `std::time::Instant`.
+
+The interface, fixed by step 2's audit. Its only additions: the core's
+`Instant` above, and `LastReceived` in `transport/mod.rs` reading
+`rt::Instant` like the driver.
 
 ```rust
 // Tasks
@@ -295,6 +321,13 @@ where
 
 // Monotonic time
 pub(crate) struct Instant { /* tokio::time::Instant on native, web_time::Instant on wasm */ }
+// The core's `Instant`: `into_std()` / `from_std()` on native (tokio's clock,
+// so tests with paused time also move the core's), identity on wasm.
+impl Instant {
+    pub(crate) fn now() -> Self;
+    pub(crate) fn into_core(self) -> centrifuge_client_core::time::Instant;
+    pub(crate) fn from_core(at: centrifuge_client_core::time::Instant) -> Self;
+}
 pub(crate) async fn sleep_until(deadline: Instant);
 pub(crate) async fn timeout<F: Future>(d: Duration, f: F) -> Result<F::Output, Elapsed>;
 pub(crate) async fn timeout_at<F: Future>(deadline: Instant, f: F) -> Result<F::Output, Elapsed>;
