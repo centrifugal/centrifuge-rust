@@ -4,6 +4,8 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+## [0.1.2]
+
 ### Added
 
 - Browsers (`wasm32-unknown-unknown`): the client runs in a page or a Dedicated Worker over the browser's `WebSocket` and `fetch` (HTTP-streaming), with the same API (handlers needn't be `Send` there). `EventDelivery::Inline` is the default on wasm32; an explicit `proxy()`, `tls()`, `http_headers()` or `EventDelivery::Thread`, or a missing browser API, fails `build()`. As in centrifuge-js, `online` / `offline` and the back/forward cache are acted on. New `ClientBuilder::credentials` (`Credentials`) sets `fetch`'s credentials mode; no effect on other targets. Tested in Chrome and Firefox in CI. See the README.
