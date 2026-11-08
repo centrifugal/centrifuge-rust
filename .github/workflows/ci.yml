@@ -310,6 +310,21 @@ jobs:
           wasm-bindgen --target web --out-dir www/pkg target/wasm32-unknown-unknown/debug/browser_e2e.wasm
           npm ci --no-fund --no-audit
           node run.mjs
+      # A warning, never a failure: the gzipped size of a minimal app (the e2e
+      # one, release, name section removed) against tests/browser-e2e/size-baseline,
+      # updated on purpose when a change is worth its size.
+      - name: Browser build size
+        if: matrix.browser == 'chrome'
+        working-directory: tests/browser-e2e
+        run: |
+          cargo build --release --target wasm32-unknown-unknown --locked
+          wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir target/size target/wasm32-unknown-unknown/release/browser_e2e.wasm
+          size=$(gzip -9 -c target/size/browser_e2e_bg.wasm | wc -c)
+          base=$(cat size-baseline)
+          echo "Browser build: $size bytes gzipped (baseline $base)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt $((base * 11 / 10)) ]; then
+            echo "::warning::browser build is $size bytes gzipped, over 10% above the $base baseline"
+          fi
       - if: failure() || cancelled()
         run: docker compose logs --tail 200
 

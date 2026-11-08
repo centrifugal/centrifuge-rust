@@ -14,3 +14,10 @@ centrifuge-client = { path = "../../crates/centrifuge-client", default-features 
 wasm-bindgen = "0.2.100"
 
 [workspace]
+
+# For the size check in CI (docs/wasm-plan.md, "Expected size").
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
