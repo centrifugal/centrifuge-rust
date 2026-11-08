@@ -254,9 +254,9 @@ impl Client {
         Ok(())
     }
 
-    /// Replaces the headers sent inside the connect command from the next
-    /// connect attempt (Centrifugo `emulated_headers`; for environments that
-    /// can't set real headers).
+    /// Replaces the headers sent inside the connect command, which Centrifugo
+    /// forwards to its proxy handlers (its `emulated_headers` option), from
+    /// the next connect attempt.
     ///
     /// # Errors
     ///
@@ -771,15 +771,20 @@ impl ClientBuilder {
 
     /// Real HTTP headers: on the WebSocket upgrade, the HTTP-stream request
     /// and every emulation request. Not in a browser, which doesn't let a
-    /// page set them on a WebSocket: `build()` fails there; use
-    /// [`emulated_headers`](Self::emulated_headers).
+    /// page set them on a WebSocket: `build()` fails there. Headers meant for
+    /// Centrifugo's proxy handlers can go in
+    /// [`emulated_headers`](Self::emulated_headers) instead.
     pub fn http_headers(mut self, headers: http::HeaderMap) -> Self {
         self.http_headers = headers;
         self
     }
 
-    /// Headers sent inside the connect command (Centrifugo
-    /// `emulated_headers`).
+    /// Headers sent inside the connect command (Centrifugo's headers
+    /// emulation). Centrifugo forwards them to its proxy handlers when its
+    /// `emulated_headers` option lists them; unlike
+    /// [`http_headers`](Self::http_headers), they aren't HTTP headers, so
+    /// neither Centrifugo nor anything in front of it sees them as such.
+    /// Works in browsers too.
     pub fn emulated_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.emulated_headers = headers;
         self

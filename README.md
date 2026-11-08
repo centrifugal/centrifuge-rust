@@ -196,7 +196,7 @@ client.connect()?;
 A few things work differently, because the browser is in charge:
 
 - **Keep handlers quick.** They run on the page's own thread, so a slow handler makes the page and the connection lag.
-- **No proxy, TLS or custom HTTP header settings.** The browser handles these itself, and setting them is an error. To pass headers to Centrifugo, use `emulated_headers()`.
+- **No proxy, TLS or custom HTTP header settings.** The browser handles these itself, and setting them is an error. If your Centrifugo proxy handlers need headers (a connect proxy to your backend, say), send them with `emulated_headers()`: Centrifugo forwards them to the proxy when its `emulated_headers` option lists them.
 - **Allow your site on the server.** Add your page's origin to Centrifugo's `client.allowed_origins`, or the connection is refused. If the page and Centrifugo are on different domains, HTTP-streaming also needs CORS.
 - **Prefer a token for authentication.** A token works the same over both transports. If you rely on cookies and Centrifugo is on another domain, set `credentials(Credentials::Include)`, or HTTP-streaming won't send them.
 - **Network changes are handled for you.** The client reconnects as soon as the device is back online, and disconnects cleanly when the user navigates away from the page.

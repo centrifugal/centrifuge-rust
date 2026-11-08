@@ -174,9 +174,11 @@ available on wasm unchanged.
      roots under a custom rustls config are today.
    - The one exception is `runtime(tokio::runtime::Handle)`. Its parameter
      type doesn't exist without a Tokio runtime, so it's native-only.
-   - `emulated_headers` is the browser replacement for `http_headers`: those
-     headers travel inside the connect command (Centrifugo header emulation),
-     not as HTTP headers.
+   - `emulated_headers` isn't a replacement for `http_headers`: those headers
+     travel inside the connect command (Centrifugo's headers emulation), and
+     Centrifugo forwards them to its proxy handlers when its
+     `emulated_headers` option lists them. Headers meant for proxy handlers
+     can go there in a browser; nothing sees them as HTTP headers.
 7. **Platform preconditions live in one internal `platform` module.** It has
    two hooks with a body per platform (native no-op, Android, wasm):
    - `platform::check_build(..)`, called from `build()`, checks everything
@@ -691,7 +693,8 @@ tests passed 15 runs in a row. Found on the way, for the docs (step 10):
     Centrifugo checks WebSocket origins against `allowed_origins`, and
     `fetch` goes through CORS;
   - custom HTTP headers can't be set on a browser WebSocket, which is why
-    `http_headers` is rejected and `emulated_headers` exists (decision 6).
+    `http_headers` is rejected (decision 6); headers for Centrifugo's proxy
+    handlers can go in `emulated_headers`, which Centrifugo forwards to them.
 
 **Result (done).** `transport/web_http.rs`: the stream and every emulation
 POST hold their own `AbortController` behind a guard that aborts on drop;

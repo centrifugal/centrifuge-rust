@@ -131,8 +131,8 @@ mod browser {
         }
         if c.http_headers {
             return refuse(
-                "a page can't set HTTP headers on a WebSocket: use emulated_headers() \
-                 instead of http_headers()",
+                "a page can't set HTTP headers on a WebSocket: remove http_headers() \
+                 (headers for Centrifugo's proxy handlers can go in emulated_headers())",
             );
         }
         if c.event_delivery == EventDelivery::Thread {
