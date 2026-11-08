@@ -53,6 +53,8 @@
 //! guide and the [design](https://github.com/centrifugal/centrifuge-rust/blob/main/docs/spec.md)
 //! for the exact behaviour.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The same `Arc`s as native: on wasm their contents needn't be `Send`.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -65,6 +67,7 @@ mod error;
 mod events;
 mod maybe_send;
 mod platform;
+mod rt;
 mod shared;
 mod stats;
 mod stream;

@@ -15,11 +15,12 @@ mod ws;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use centrifuge_client_core::codec::{self, DecodeError, Protocol};
 use centrifuge_client_core::machine::{CloseReason, TransportId, TransportKind};
 use centrifuge_client_core::proto;
+// The real monotonic clock, as the driver's watchdog reads.
+use centrifuge_client_core::time::Instant;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use url::Url;
 

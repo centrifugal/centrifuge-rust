@@ -18,6 +18,8 @@ impl std::fmt::Debug for Net {
 }
 
 impl Net {
+    // The native signature: there, building the TLS config can fail.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn new(
         proxy: ProxyConfig,
         _tls: &TlsConfig,

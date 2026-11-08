@@ -626,6 +626,7 @@ client_handlers! {
 #[must_use = "a builder does nothing until build() is called"]
 pub struct ClientBuilder {
     endpoints: Vec<TransportEndpoint>,
+    #[cfg(not(target_arch = "wasm32"))]
     runtime: Option<tokio::runtime::Handle>,
     protocol: Protocol,
     token: String,
@@ -665,6 +666,7 @@ impl ClientBuilder {
     fn new(endpoints: Vec<TransportEndpoint>) -> Self {
         Self {
             endpoints,
+            #[cfg(not(target_arch = "wasm32"))]
             runtime: None,
             protocol: Protocol::default(),
             token: String::new(),
@@ -690,7 +692,9 @@ impl ClientBuilder {
 
     /// The Tokio runtime to run on. Default: the current one at `build()`.
     /// Needed where `build()` runs outside a runtime (Tauri setup hooks:
-    /// `tauri::async_runtime::handle()`).
+    /// `tauri::async_runtime::handle()`). Native only: a browser has no Tokio
+    /// runtime.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn runtime(mut self, handle: tokio::runtime::Handle) -> Self {
         self.runtime = Some(handle);
         self
@@ -876,6 +880,7 @@ impl ClientBuilder {
     #[allow(clippy::too_many_lines)] // validation, then wiring; clearer in one place
     pub fn build(self) -> Result<Client, Error> {
         let endpoints = self.endpoints()?;
+        #[cfg(not(target_arch = "wasm32"))]
         let runtime = match self.runtime.clone() {
             Some(h) => h,
             None => tokio::runtime::Handle::try_current().map_err(|_| {
@@ -949,7 +954,7 @@ impl ClientBuilder {
             max_reconnect_delay: self.max_reconnect_delay,
             max_server_ping_delay: self.max_server_ping_delay,
             max_message_size: self.max_message_size,
-            seed: random_seed(),
+            seed: crate::rt::random_seed(),
         });
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -970,7 +975,10 @@ impl ClientBuilder {
             client: Arc::downgrade(&inner),
             shared: shared.clone(),
         };
+        #[cfg(not(target_arch = "wasm32"))]
         let dispatcher = Dispatcher::new(self.event_delivery, delivery, runtime.clone())?;
+        #[cfg(target_arch = "wasm32")]
+        let dispatcher = Dispatcher::new(self.event_delivery, delivery)?;
         let driver = Driver::new(
             core,
             shared,
@@ -983,25 +991,16 @@ impl ClientBuilder {
             dispatcher,
             rx,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         runtime.spawn(driver.run());
+        #[cfg(target_arch = "wasm32")]
+        crate::rt::spawn(driver.run());
         Ok(Client { inner })
     }
 }
 
-/// Seeds backoff jitter differently per client and process, so many clients
-/// restarted together don't reconnect in lockstep.
-fn random_seed() -> u64 {
-    use std::hash::{BuildHasher as _, Hasher as _};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    );
-    h.finish()
-}
-
+// The native contract; on wasm, handlers and futures needn't be `Send`.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 fn _assert_traits() {
     fn send_sync<T: Send + Sync>() {}

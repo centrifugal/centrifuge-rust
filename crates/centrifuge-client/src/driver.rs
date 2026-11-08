@@ -8,6 +8,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use centrifuge_client_core::time::Instant as CoreInstant;
+
 use centrifuge_client_core::machine::{
     Callback, CallbackError, Core, Event, Input, Op, OpenRequest, Outputs, State, SubKey, SubState,
     TimerKey, TransportId, TransportKind,
@@ -15,35 +17,38 @@ use centrifuge_client_core::machine::{
 use centrifuge_client_core::proto;
 use futures_util::FutureExt as _;
 use tokio::sync::{Semaphore, mpsc, watch};
-use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::dispatch::{Dispatcher, IN_CALLBACK};
+use crate::dispatch::Dispatcher;
 use crate::error::TokenError;
+use crate::maybe_send::{dyn_send, dyn_send_sync};
+use crate::rt;
 use crate::shared::{Command, SessionHandle, Shared, Snapshot, SubSnapshot, lock};
 use crate::transport::{
     self, Inbound, LastReceived, READ_AHEAD_BYTES, READ_AHEAD_ITEMS, WriteReq, WriterTx,
 };
 
 pub(crate) type TokenFuture =
-    Pin<Box<dyn Future<Output = Result<Option<String>, TokenError>> + Send>>;
+    Pin<Box<dyn_send!(Future<Output = Result<Option<String>, TokenError>>)>>;
 pub(crate) type ConnTokenGetter =
-    Arc<dyn Fn(crate::client::ConnectionTokenContext) -> TokenFuture + Send + Sync>;
-pub(crate) type SubTokenFuture = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>;
+    Arc<dyn_send_sync!(Fn(crate::client::ConnectionTokenContext) -> TokenFuture)>;
+pub(crate) type SubTokenFuture = Pin<Box<dyn_send!(Future<Output = Result<String, TokenError>>)>>;
 pub(crate) type SubTokenGetter =
-    Arc<dyn Fn(crate::subscription::SubscriptionTokenContext) -> SubTokenFuture + Send + Sync>;
+    Arc<dyn_send_sync!(Fn(crate::subscription::SubscriptionTokenContext) -> SubTokenFuture)>;
 pub(crate) type StateFuture = Pin<
     Box<
-        dyn Future<
+        dyn_send!(
+            Future<
                 Output = Result<
                     centrifuge_client_core::types::StreamPosition,
                     crate::error::BoxError,
                 >,
-            > + Send,
+            >
+        ),
     >,
 >;
 pub(crate) type StateGetter =
-    Arc<dyn Fn(crate::subscription::SubscriptionGetStateContext) -> StateFuture + Send + Sync>;
+    Arc<dyn_send_sync!(Fn(crate::subscription::SubscriptionGetStateContext) -> StateFuture)>;
 
 /// Per-subscription callbacks, looked up by key.
 #[derive(Default, Clone)]
@@ -60,7 +65,7 @@ pub(crate) struct DriverConfig {
 }
 
 struct TransportHandle {
-    task: JoinHandle<()>,
+    task: rt::AbortHandle,
     closing: watch::Sender<bool>,
     writer: Option<WriterTx>,
 }
@@ -80,12 +85,14 @@ pub(crate) struct Driver {
     budget: Arc<Semaphore>,
     last_received: Arc<LastReceived>,
     applied_seq: u64,
-    wall: (SystemTime, std::time::Instant),
+    /// The watchdog's last reading: wall clock (`None` where it's invalid,
+    /// wasm only) and the real monotonic clock.
+    wall: (Option<SystemTime>, CoreInstant),
     stopping: bool,
     /// `close()` or the last handle dropped: don't wait for stream consumers.
     stop: watch::Receiver<bool>,
     /// Token and state callbacks in flight, aborted on shutdown.
-    tasks: Vec<tokio::task::AbortHandle>,
+    tasks: Vec<rt::AbortHandle>,
     finished: bool,
 }
 
@@ -139,7 +146,7 @@ impl Driver {
             budget: Arc::new(Semaphore::new(READ_AHEAD_BYTES as usize)),
             last_received: Arc::new(LastReceived::new()),
             applied_seq: 0,
-            wall: (SystemTime::now(), std::time::Instant::now()),
+            wall: (rt::system_now(), CoreInstant::now()),
             stopping: false,
             stop,
             tasks: Vec::new(),
@@ -147,13 +154,12 @@ impl Driver {
         }
     }
 
-    fn now() -> std::time::Instant {
-        tokio::time::Instant::now().into_std()
+    fn now() -> CoreInstant {
+        rt::to_core(rt::Instant::now())
     }
 
     pub(crate) async fn run(mut self) {
-        let mut watchdog = tokio::time::interval(Duration::from_secs(2));
-        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut watchdog = rt::interval(Duration::from_secs(2));
         loop {
             let Some(next) = self.wait_next(&mut watchdog).await else {
                 break;
@@ -176,12 +182,12 @@ impl Driver {
         self.shutdown();
     }
 
-    async fn wait_next(&mut self, watchdog: &mut tokio::time::Interval) -> Option<Next> {
+    async fn wait_next(&mut self, watchdog: &mut rt::Interval) -> Option<Next> {
         let deadline = self.core.next_deadline();
         let has_delivery = self.core.has_pending_delivery();
         let sleep = async {
             match deadline {
-                Some((at, _)) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                Some((at, _)) => rt::sleep_until(rt::from_core(at)).await,
                 None => std::future::pending().await,
             }
         };
@@ -268,8 +274,12 @@ impl Driver {
 
     async fn watchdog(&mut self) {
         let (wall0, mono0) = self.wall;
-        let (wall1, mono1) = (SystemTime::now(), std::time::Instant::now());
+        let (wall1, mono1) = (rt::system_now(), CoreInstant::now());
         self.wall = (wall1, mono1);
+        // An invalid reading skips this check; the next valid one is the base.
+        let (Some(wall0), Some(wall1)) = (wall0, wall1) else {
+            return;
+        };
         let wall = wall1.duration_since(wall0).unwrap_or_default();
         let mono = mono1.duration_since(mono0);
         if wall > mono + WAKE_GAP {
@@ -426,7 +436,7 @@ impl Driver {
         if state == State::Connected {
             let mut since = lock(&self.shared.connected_since);
             if since.is_none() {
-                *since = Some(SystemTime::now());
+                *since = rt::system_now();
             }
         } else {
             *lock(&self.shared.connected_since) = None;
@@ -473,7 +483,7 @@ impl Driver {
             last_received: self.last_received.clone(),
             closing: closing_rx,
         };
-        let task = tokio::spawn(transport::run(ctx, req.initial));
+        let task = rt::spawn(transport::run(ctx, req.initial));
         self.transports.insert(
             req.transport,
             TransportHandle {
@@ -506,7 +516,7 @@ impl Driver {
                     });
                     return;
                 };
-                let task = tokio::spawn(IN_CALLBACK.scope(id, async move {
+                let task = rt::spawn(rt::callback_scope(id, async move {
                     let fut = AssertUnwindSafe(async move {
                         getter(crate::client::ConnectionTokenContext::new()).await
                     })
@@ -514,7 +524,7 @@ impl Driver {
                     let result = settle(fut.await.unwrap_or_else(|p| Err(panicked(&*p))));
                     let _ = tx.send(Input::TokenSettled { flow, result });
                 }));
-                self.tasks.push(task.abort_handle());
+                self.tasks.push(task);
             }
             Callback::SubscriptionToken { flow, sub, channel } => {
                 let getter = lock(&self.shared.by_key)
@@ -527,20 +537,20 @@ impl Driver {
                     });
                     return;
                 };
-                let task = tokio::spawn(IN_CALLBACK.scope(id, async move {
+                let task = rt::spawn(rt::callback_scope(id, async move {
                     let ctx = crate::subscription::SubscriptionTokenContext::new(channel);
                     let fut = AssertUnwindSafe(async move { getter(ctx).await }).catch_unwind();
                     let result = settle(fut.await.unwrap_or_else(|p| Err(panicked(&*p))).map(Some));
                     let _ = tx.send(Input::TokenSettled { flow, result });
                 }));
-                self.tasks.push(task.abort_handle());
+                self.tasks.push(task);
             }
             Callback::GetState { flow, sub, channel } => {
                 let getter = lock(&self.shared.by_key)
                     .get(&sub)
                     .and_then(|s| s.callbacks.get_state.clone());
                 let Some(getter) = getter else { return };
-                let task = tokio::spawn(IN_CALLBACK.scope(id, async move {
+                let task = rt::spawn(rt::callback_scope(id, async move {
                     let ctx = crate::subscription::SubscriptionGetStateContext::new(channel);
                     let fut = AssertUnwindSafe(async move { getter(ctx).await }).catch_unwind();
                     let result = match fut.await {
@@ -550,7 +560,7 @@ impl Driver {
                     };
                     let _ = tx.send(Input::StateSettled { flow, result });
                 }));
-                self.tasks.push(task.abort_handle());
+                self.tasks.push(task);
             }
             _ => {}
         }

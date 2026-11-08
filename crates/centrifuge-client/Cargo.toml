@@ -47,6 +47,10 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 # browser; setting a `TlsConfig` there is a configuration error
 # (docs/wasm-plan.md, step 1).
 rustls-pki-types = "1.12"
+js-sys = "0.3.77"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+web-time = "1.1"
 
 # `centrifuge::android` names jni types; the same version rustls-platform-verifier uses.
 [target.'cfg(target_os = "android")'.dependencies]

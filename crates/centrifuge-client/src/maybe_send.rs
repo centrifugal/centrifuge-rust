@@ -27,3 +27,27 @@ impl<T: Sync + ?Sized> MaybeSync for T {}
 pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSync for T {}
+
+/// `dyn Trait + Send` on native targets, `dyn Trait` on `wasm32`: the stored
+/// form of a `MaybeSend` handler or future, since a trait object can only add
+/// auto traits.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! dyn_send {
+    ($($t:tt)+) => { dyn $($t)+ + Send };
+}
+#[cfg(target_arch = "wasm32")]
+macro_rules! dyn_send {
+    ($($t:tt)+) => { dyn $($t)+ };
+}
+pub(crate) use dyn_send;
+
+/// `dyn Trait + Send + Sync` on native targets, `dyn Trait` on `wasm32`.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! dyn_send_sync {
+    ($($t:tt)+) => { dyn $($t)+ + Send + Sync };
+}
+#[cfg(target_arch = "wasm32")]
+macro_rules! dyn_send_sync {
+    ($($t:tt)+) => { dyn $($t)+ };
+}
+pub(crate) use dyn_send_sync;
