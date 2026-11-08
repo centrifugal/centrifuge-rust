@@ -55,6 +55,21 @@ pub(crate) fn check_build(c: &BuildCheck<'_>) -> Result<(), Error> {
     }
 }
 
+/// `Client::set_http_headers`: a page can't set HTTP headers, so in a
+/// browser only an empty map (nothing to send) is accepted.
+///
+/// # Errors
+///
+/// [`Error::Configuration`] for headers in a browser.
+#[allow(clippy::unnecessary_wraps)] // infallible natively
+pub(crate) fn check_http_headers_set(non_empty: bool) -> Result<(), Error> {
+    if cfg!(target_arch = "wasm32") && non_empty {
+        browser::refuse_http_headers()
+    } else {
+        Ok(())
+    }
+}
+
 /// `Client::set_proxy`: in a browser only `ProxyConfig::System`, which
 /// means "the browser decides".
 ///
@@ -130,10 +145,7 @@ mod browser {
             return refuse("the browser verifies certificates: remove tls()");
         }
         if c.http_headers {
-            return refuse(
-                "a page can't set HTTP headers on a WebSocket: remove http_headers() \
-                 (headers for Centrifugo's proxy handlers can go in emulated_headers())",
-            );
+            return refuse_http_headers();
         }
         if c.event_delivery == EventDelivery::Thread {
             return refuse(
@@ -163,6 +175,13 @@ mod browser {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn refuse_http_headers() -> Result<(), Error> {
+        refuse(
+            "a page can't set HTTP headers on a WebSocket: remove http_headers() \
+             (headers for Centrifugo's proxy handlers can go in emulated_headers())",
+        )
     }
 
     pub(super) fn check_proxy(proxy: &ProxyConfig) -> Result<(), Error> {

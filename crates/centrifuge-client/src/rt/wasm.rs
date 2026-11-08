@@ -10,6 +10,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::{AbortHandle as Abort, Abortable};
+
+use super::logic;
 use wasm_bindgen::prelude::*;
 pub(crate) use web_time::Instant;
 
@@ -67,10 +69,6 @@ extern "C" {
     fn clear_timeout(id: &JsValue);
 }
 
-/// The longest single `setTimeout`: `2^31 - 1` ms (about 24.8 days); a
-/// longer wait reschedules.
-const MAX_TIMEOUT_MS: u128 = i32::MAX as u128;
-
 /// One pending `setTimeout`. Its callback only wakes a task through the
 /// shared slot, so one that fires anyway (its `clearTimeout` raced the event
 /// loop) finds nothing to do.
@@ -97,11 +95,7 @@ impl Timer {
                 }
             })
         };
-        // Rounded up: an early wake is rescheduled anyway, but a late one is
-        // cheaper than a wasted round trip.
-        let ms = after.as_micros().div_ceil(1000).min(MAX_TIMEOUT_MS);
-        let ms = i32::try_from(ms).unwrap_or(i32::MAX);
-        let id = set_timeout(callback.as_ref().unchecked_ref(), ms);
+        let id = set_timeout(callback.as_ref().unchecked_ref(), logic::timeout_ms(after));
         Self {
             id,
             fired,
@@ -182,10 +176,6 @@ pub(crate) async fn timeout<F: Future>(d: Duration, future: F) -> Result<F::Outp
     }
 }
 
-/// A late tick at least this much past its time delays the next one (Tokio's
-/// threshold for a missed tick).
-const MISSED: Duration = Duration::from_millis(5);
-
 pub(crate) struct Interval {
     period: Duration,
     next: Instant,
@@ -196,14 +186,7 @@ impl Interval {
     pub(crate) async fn tick(&mut self) -> Instant {
         let at = self.next;
         sleep_until(at).await;
-        let now = Instant::now();
-        // `MissedTickBehavior::Delay`: a late tick schedules the next one a
-        // full period after it, so there's never a burst of catch-up ticks.
-        self.next = if now > at + MISSED {
-            now + self.period
-        } else {
-            at + self.period
-        };
+        self.next = logic::next_tick(at, Instant::now(), self.period);
         at
     }
 }
@@ -226,46 +209,9 @@ pub(crate) fn from_core(at: centrifuge_client_core::time::Instant) -> Instant {
 
 // ---- Callback marker ----
 
-thread_local! {
-    /// The client whose token or state callback is being polled (§9.5); 0
-    /// for none. One thread, so "set during each poll" is a task-local.
-    static IN_CALLBACK: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Restores the previous value however the poll ends (a return, `Pending`,
-/// a panic): nested scopes unwind in order.
-struct Scope(u64);
-
-impl Scope {
-    fn enter(id: u64) -> Self {
-        Self(IN_CALLBACK.replace(id))
-    }
-}
-
-impl Drop for Scope {
-    fn drop(&mut self) {
-        IN_CALLBACK.set(self.0);
-    }
-}
-
-pub(crate) async fn callback_scope<F: Future>(id: u64, future: F) -> F::Output {
-    let mut future = pin!(future);
-    poll_fn(|cx| {
-        let _scope = Scope::enter(id);
-        future.as_mut().poll(cx)
-    })
-    .await
-}
-
-/// Whether the current task runs a token or state callback of client `id`.
-pub(crate) fn in_callback(id: u64) -> bool {
-    id != 0 && IN_CALLBACK.get() == id
-}
+pub(crate) use super::logic::{callback_scope, in_callback};
 
 // ---- Wall clock and randomness ----
-
-/// The largest time value JavaScript's `Date` holds (ECMA-262 §21.4.1.22).
-const MAX_DATE_MS: f64 = 8.64e15;
 
 /// The first invalid reading is a warning, later ones debug: a broken clock
 /// can't flood the log.
@@ -274,13 +220,7 @@ static CLOCK_WARNED: AtomicBool = AtomicBool::new(false);
 /// `Date.now()`, with millisecond precision; `None` for an invalid value.
 pub(crate) fn system_now() -> Option<SystemTime> {
     let ms = js_sys::Date::now();
-    let time = if ms.is_finite() && (0.0..=MAX_DATE_MS).contains(&ms) {
-        // In range, checked just above.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        UNIX_EPOCH.checked_add(Duration::from_millis(ms as u64))
-    } else {
-        None
-    };
+    let time = logic::system_time_from_ms(ms);
     if time.is_none() {
         if CLOCK_WARNED.swap(true, Ordering::Relaxed) {
             tracing::debug!(target: "centrifuge", ms, "invalid wall-clock time");
@@ -295,9 +235,7 @@ pub(crate) fn system_now() -> Option<SystemTime> {
 /// through the same hasher as native.
 pub(crate) fn random_seed() -> u64 {
     use std::hash::{BuildHasher as _, Hasher as _};
-    // `x` is in [0, 1), so `x * 2^32` fits a u32.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let word = || (js_sys::Math::random() * 4_294_967_296.0) as u32;
+    let word = || logic::random_word(js_sys::Math::random());
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u64((u64::from(word()) << 32) | u64::from(word()));
     if let Some(t) = system_now() {

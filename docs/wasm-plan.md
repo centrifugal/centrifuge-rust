@@ -828,7 +828,8 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   `WebSocket`, or `fetch` / `AbortController`, for the configured endpoints
   (fallbacks included), all in `platform::check_build`. The builder records
   whether `proxy()` / `tls()` were called; `set_proxy` refuses anything but
-  `ProxyConfig::System` in a browser.
+  `ProxyConfig::System` in a browser, and `set_http_headers` any header
+  (an empty map is fine), so neither runtime setter is silently ignored.
 - `ClientBuilder::credentials(Credentials)` (`SameOrigin`, the default;
   `Include`; `Omit`) sets `fetch`'s mode. It has no effect on other
   targets. That isn't an exception to decision 6, which keeps an app from
@@ -896,7 +897,15 @@ server sees the client go within milliseconds, and it's back on return) and
 `worker.terminate()`; with the lifecycle listeners removed, the bfcache
 test fails. The wasm job lints the client with and without HTTP-streaming,
 fails if a native-only crate reaches the wasm graph, and greps for blocking
-Tokio APIs. Size: measured above. Still open:
+Tokio APIs. The MSRV job also checks the browser build with Rust 1.85
+(its own dependencies: `wasm-bindgen`, `web-sys`, ...). The browser
+runtime's rules that need no JavaScript (timer delays and clamping, the
+missed-tick rule, clock and random conversions, the callback marker,
+including after a panic) are in `rt/logic.rs`, built on every target and
+unit-tested on the host. Browser tests also cover fossil delta (and that
+only deltas cross the wire) and a missing `WebSocket` (a configuration
+error, not a panic). `cargo semver-checks` runs in the release workflow,
+not on every push. Size: measured above. Still open:
 - browser tests for two table rows (`close` after an abort, frames split
   across chunks), which a browser can't be made to produce on demand; the
   logic is shared and natively or unit tested. A POST hanging when its

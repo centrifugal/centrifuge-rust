@@ -17,6 +17,7 @@
 //!   value is invalid.
 //! - `random_seed()`: a jitter seed, not cryptographic.
 
+mod logic;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]

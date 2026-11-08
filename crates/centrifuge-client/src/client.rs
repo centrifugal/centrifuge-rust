@@ -247,9 +247,11 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Configuration`] for headers the transport manages (`Host`,
-    /// `Upgrade`, `Sec-WebSocket-*`, …).
+    /// `Upgrade`, `Sec-WebSocket-*`, …), and in a browser for any header (a
+    /// page can't set them; an empty map is accepted).
     pub fn set_http_headers(&self, headers: http::HeaderMap) -> Result<(), Error> {
         check_http_headers(&headers)?;
+        crate::platform::check_http_headers_set(!headers.is_empty())?;
         *lock(&self.inner.shared.http_headers) = headers;
         Ok(())
     }

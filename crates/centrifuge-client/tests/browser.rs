@@ -412,3 +412,74 @@ async fn refused_connection_reconnects() {
     assert_eq!(c.state(), centrifuge::State::Connecting);
     c.close().await;
 }
+
+/// Fossil delta compression in a browser: big, similar publications arrive
+/// intact, and after the first only their deltas cross the wire.
+#[wasm_bindgen_test]
+async fn delta_compression() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .protocol(Protocol::Json)
+        .build()
+        .unwrap();
+    let channel = format!("delta:browser_{}", js_sys::Date::now());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sub = c
+        .new_subscription(&channel)
+        .delta(centrifuge::DeltaType::Fossil)
+        .on_publication(move |_, e| {
+            let _ = tx.send(String::from_utf8_lossy(&e.data).into_owned());
+        })
+        .build()
+        .unwrap();
+    sub.subscribe();
+    c.connect().unwrap();
+    sub.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let publisher = client(Protocol::Json, false);
+    publisher.connect().unwrap();
+    let big = "x".repeat(2000);
+    let mut after_first = 0;
+    for i in 0..5 {
+        let before = c.statistics().bytes_in;
+        let data = format!(r#"{{"i":{i},"payload":"{big}"}}"#);
+        publisher.publish(&channel, data.clone()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), data);
+        if i > 0 {
+            after_first += c.statistics().bytes_in - before;
+        }
+    }
+    assert!(
+        after_first < 4 * 1000,
+        "{after_first} bytes for 4 deltas of 2 KB payloads"
+    );
+    publisher.close().await;
+    c.close().await;
+}
+
+/// A browser API the configured transport needs is missing: `build()` says
+/// so, it doesn't panic.
+#[wasm_bindgen_test]
+fn missing_browser_api_is_a_configuration_error() {
+    let global = js_sys::global();
+    let ws = js_sys::Reflect::get(&global, &"WebSocket".into()).unwrap();
+    assert!(js_sys::Reflect::delete_property(&global, &"WebSocket".into()).unwrap());
+    let r = Client::builder_with_transports([endpoint(false)]).build();
+    js_sys::Reflect::set(&global, &"WebSocket".into(), &ws).unwrap();
+    let err = r.unwrap_err();
+    assert!(
+        matches!(err, centrifuge::Error::Configuration(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("no `WebSocket`"), "{err}");
+}
+
+/// Headers can't be set at runtime in a browser either.
+#[wasm_bindgen_test]
+fn set_http_headers_is_refused() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .build()
+        .unwrap();
+    let mut h = http::HeaderMap::new();
+    h.insert("x-a", http::HeaderValue::from_static("1"));
+    assert!(c.set_http_headers(h).is_err());
+    assert!(c.set_http_headers(http::HeaderMap::new()).is_ok());
+}
