@@ -6,7 +6,9 @@
 [![MSRV](https://img.shields.io/crates/msrv/centrifuge-client)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The official Rust real-time client SDK for [Centrifugo](https://centrifugal.dev) and the [Centrifuge](https://github.com/centrifugal/centrifuge) library. Built for desktop apps (Tauri and others), backend services, bots and tools that need a live connection.
+**[Quick start](#quick-start)** · [How it works](#how-it-works) · [Desktop apps and Tauri](#desktop-apps-and-tauri) · [In the browser (WASM)](#in-the-browser-wasm) · [Cargo features](#cargo-features) · [Compatibility](#compatibility) · [Differences from centrifuge-js](#differences-from-centrifuge-js) · [How it's tested](#how-its-tested) · [Contributing](#contributing)
+
+The official Rust real-time client SDK for [Centrifugo](https://centrifugal.dev) and the [Centrifuge](https://github.com/centrifugal/centrifuge) library. Built for desktop apps (Tauri and others), browser apps (WASM), backend services, bots and tools that need a live connection.
 
 - **Transports:** WebSocket, and HTTP-streaming fallback.
 - **Protocols:** Protobuf (the default) and JSON.
