@@ -200,7 +200,7 @@ A few things work differently, because the browser is in charge:
 - **Network changes are handled for you.** The client reconnects as soon as the device is back online, and disconnects cleanly when the user navigates away from the page.
 - **Size.** About 200–250 KB gzipped. If you only connect to plain ASCII host names, add `idna_adapter = "=1.0.0"` to your app's dependencies to save about 46 KB.
 
-Tested in Chrome and Firefox. Safari hasn't been tested yet, and Service Workers aren't supported.
+Tested in Chrome and Firefox. Service Workers aren't supported.
 
 ## Cargo features
 
