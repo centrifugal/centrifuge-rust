@@ -1,6 +1,8 @@
 //! Client-side subscription behaviour (docs/spec.md §7).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 use bytes::Bytes;
 

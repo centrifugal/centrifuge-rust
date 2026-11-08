@@ -188,7 +188,7 @@ impl Core {
         &mut self,
         flow: super::FlowId,
         result: Result<Option<String>, super::CallbackError>,
-        now: std::time::Instant,
+        now: crate::time::Instant,
         out: &mut Outputs,
     ) {
         let Some(f) = self.flows.remove(&flow) else {
@@ -209,7 +209,7 @@ impl Core {
         &mut self,
         flow: super::FlowId,
         result: Result<StreamPosition, super::CallbackError>,
-        now: std::time::Instant,
+        now: crate::time::Instant,
         out: &mut Outputs,
     ) {
         let Some(f) = self.flows.remove(&flow) else {

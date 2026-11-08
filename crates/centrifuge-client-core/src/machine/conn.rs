@@ -1,6 +1,8 @@
 //! Connection behaviour (docs/spec.md §5.8, §6).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 use super::timers::backoff;
 use super::{

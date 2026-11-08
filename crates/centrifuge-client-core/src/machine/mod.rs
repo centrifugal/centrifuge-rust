@@ -35,7 +35,9 @@ mod tests;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 use bytes::Bytes;
 
