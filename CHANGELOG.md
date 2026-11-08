@@ -6,6 +6,11 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ### Added
 
+- Browsers (`wasm32-unknown-unknown`): the client runs in a page or a Dedicated Worker over the browser's `WebSocket` and `fetch` (HTTP-streaming), with the same API (handlers needn't be `Send` there). `EventDelivery::Inline` is the default on wasm32; an explicit `proxy()`, `tls()`, `http_headers()` or `EventDelivery::Thread`, or a missing browser API, fails `build()`. As in centrifuge-js, `online` / `offline` and the back/forward cache are acted on. New `ClientBuilder::credentials` (`Credentials`) sets `fetch`'s credentials mode; no effect on other targets. Tested in Chrome and Firefox in CI. See the README.
+- `centrifuge_client_core::time::Instant`, the clock type the state machine takes (`std::time::Instant` on native targets).
+
+### Added
+
 - `centrifuge::android` (Android only): `init_with_env`, `init_with_refs` and `init_with_runtime` set up the TLS platform verifier through the client's own copy of rustls-platform-verifier, so the app can't initialise a different version by mistake. Without the setup, `build()` fails with `Error::Configuration` when an endpoint uses TLS, instead of the verifier panicking on the first connection. Exempt from semver: the signatures use `jni` types, re-exported as `centrifuge::android::jni` (docs/spec.md §5.2). An app that sets up rustls-platform-verifier directly, as the earlier docs on `main` said, or through another library, also calls the wrapper once; it's a no-op then, and without it `build()` refuses TLS endpoints.
 
 ### Fixed
