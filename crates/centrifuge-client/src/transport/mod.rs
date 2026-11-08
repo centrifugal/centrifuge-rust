@@ -11,8 +11,11 @@ pub(crate) mod net;
 #[cfg(target_arch = "wasm32")]
 #[path = "net_wasm.rs"]
 pub(crate) mod net;
+#[cfg(target_arch = "wasm32")]
+mod web_ws;
 #[cfg(not(target_arch = "wasm32"))]
 mod ws;
+mod ws_close;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -237,6 +240,8 @@ pub(crate) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
     match ctx.kind {
         #[cfg(not(target_arch = "wasm32"))]
         TransportKind::WebSocket => ws::run(ctx).await,
+        #[cfg(target_arch = "wasm32")]
+        TransportKind::WebSocket => web_ws::run(ctx).await,
         #[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
         TransportKind::HttpStream => http_stream::run(ctx, initial).await,
         #[allow(unreachable_patterns)]
