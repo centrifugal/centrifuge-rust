@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–5 are done: the client builds for wasm32, without browser transports yet.
+Status: in progress. Steps 1–6 are done: the client works in a browser over WebSocket; HTTP-streaming is next.
 
 ## Summary
 
@@ -590,6 +590,20 @@ step 9 widens the coverage.
   pings (already in the shared logic).
 - Get connect, subscribe, publish, pings, reconnect and shutdown working
   before step 7.
+
+**Result (done).** `transport/web_ws.rs` and `transport/ws_close.rs` (the
+close-code table, unit-tested over every `u16`). `tests/browser.rs` runs in
+headless Chrome (`wasm-bindgen-test-runner` with Chrome for Testing's
+`chromedriver`) against the docker Centrifugo: connect, subscribe, publish,
+history and close for protobuf and JSON; reconnect with recovery of
+publications missed meanwhile; 40 s connected across server pings. The fast
+tests passed 15 runs in a row. Found on the way, for the docs (step 10):
+- Centrifugo must allow the page's origin (`client.allowed_origins`), or it
+  answers the upgrade with 403 and the client keeps reconnecting; the test
+  config allows `*`. Native clients send no `Origin`.
+- A browser `WebSocket` has no read backpressure: the transport queues
+  frames until the driver takes them. The read-ahead budget still bounds
+  what reaches the driver, not the browser's queue.
 
 ### 7. Browser HTTP-streaming transport (`fetch`)
 - **Per-session ownership.** Each streaming session owns its
