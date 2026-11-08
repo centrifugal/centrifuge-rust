@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–8 are done: the client works in a browser over WebSocket and HTTP-streaming, and acts on network and back/forward cache events.
+Status: in progress. Steps 1–8 and 10 are done, step 9 mostly: the client works in a browser over WebSocket and HTTP-streaming, and acts on network and back/forward cache events.
 
 ## Summary
 
@@ -885,6 +885,21 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   graph, and binary size (release, `opt-level = "z"`, LTO, then
   `wasm-opt -Oz`).
 
+**Result (mostly done).** CI: the `browser` job runs `tests/browser.rs` (15
+tests) and `tests/worker.rs` (the client in a Dedicated Worker, both
+transports) in headless Chrome and Firefox against docker Centrifugo, and
+`tests/browser-e2e` (Playwright, Chrome) for the back/forward cache (the
+server sees the client go within milliseconds, and it's back on return) and
+`worker.terminate()`; with the lifecycle listeners removed, the bfcache
+test fails. The wasm job lints the client with and without HTTP-streaming,
+fails if a native-only crate reaches the wasm graph, and greps for blocking
+Tokio APIs. Size: measured above. Still open:
+- the soft size budget in CI;
+- browser tests for some table rows (a POST hanging when its session
+  closes, `close` after an abort, frames split across chunks); the logic is
+  shared and natively or unit tested;
+- Safari.
+
 ### 10. Docs and release
 - README section and a browser example.
 - Table of native-only and browser-specific options, including the
@@ -898,6 +913,11 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 - Callbacks run on the browser event loop and must not block (decision 8).
 - CHANGELOG entry; update spec §9.11, decision 3 and the roadmap row.
 
+
+**Result (done).** The README's "In the browser (WASM)" section (setup,
+what differs, server origin and CORS, authentication, network events, size
+and the `idna_adapter` tip, tested browsers), the spec's platforms table,
+and the changelog under Unreleased.
 ## Dependencies
 
 The initial planned direct wasm-specific dependencies are `wasm-bindgen`,
