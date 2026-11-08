@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–3 are done: the client builds for wasm32, without browser transports yet.
+Status: in progress. Steps 1–4 are done: the client builds for wasm32, without browser transports yet.
 
 ## Summary
 
@@ -474,6 +474,12 @@ are free functions.
 - Full native test suite, `cargo semver-checks`.
 - Unit tests for `rt`: abort, dropped handle, timer cancellation, shutdown
   with pending timers, interval missed-tick behavior.
+
+**Result (done).** The native suite and clippy pass; `cargo semver-checks`
+against `main` finds no semver change for either crate; the real-server
+suite ran 400 times (4 in parallel) with no hang or failure; `rt`'s native
+wrappers have unit tests (abort, dropped handle, timeout order, interval
+missed ticks, callback scope).
 
 ### 5. Browser error conversion
 Done before the transports, because both use it. `JsValue` is not
