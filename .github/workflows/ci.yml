@@ -300,7 +300,7 @@ jobs:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
           # The ping test stays connected for 40 s.
           WASM_BINDGEN_TEST_TIMEOUT: "90"
-      # Back/forward cache and worker.terminate(), driven from outside
+      # Back/forward cache, worker.terminate() and a hanging POST, driven from outside
       # (tests/browser-e2e): Chrome only, the runner's own.
       - name: Browser e2e
         if: matrix.browser == 'chrome'

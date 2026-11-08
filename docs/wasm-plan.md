@@ -894,9 +894,12 @@ server sees the client go within milliseconds, and it's back on return) and
 test fails. The wasm job lints the client with and without HTTP-streaming,
 fails if a native-only crate reaches the wasm graph, and greps for blocking
 Tokio APIs. Size: measured above. Still open:
-- browser tests for some table rows (a POST hanging when its session
-  closes, `close` after an abort, frames split across chunks); the logic is
-  shared and natively or unit tested;
+- browser tests for two table rows (`close` after an abort, frames split
+  across chunks), which a browser can't be made to produce on demand; the
+  logic is shared and natively or unit tested. A POST hanging when its
+  session closes is tested (`tests/browser-e2e`): `send()` fails within
+  milliseconds and the server sees the request aborted; without the abort,
+  the test fails;
 - Safari.
 
 ### 10. Docs and release
@@ -979,8 +982,8 @@ refuse Unicode hosts for everyone. Not parsing URLs with `url` on wasm (the
 "Future optimization" below) would save the same for every app.
 
 The soft CI budget is in the Chrome browser job: the e2e app (JSON,
-WebSocket), release, name section removed, gzipped, against
-`tests/browser-e2e/size-baseline` (234,154 bytes); more than 10% over it is
+WebSocket, HTTP-streaming), release, name section removed, gzipped, against
+`tests/browser-e2e/size-baseline` (258,653 bytes); more than 10% over it is
 a warning, never a failure. Without `wasm-opt`, since it changes nothing
 gzipped.
 

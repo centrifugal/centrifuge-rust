@@ -11,7 +11,21 @@ import { chromium } from 'playwright-core';
 const www = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www');
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm' };
 
+// An emulation endpoint that never answers, for the hanging-POST test; it
+// records whether the browser aborted each request.
+const hung = { open: 0, aborted: 0 };
+
 const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/emulation-hang')) {
+    hung.open += 1;
+    // The connection closed with the response still unsent: the browser
+    // aborted it. (A request's own 'close' only means its body was read.)
+    res.on('close', () => {
+      if (!res.writableEnded) hung.aborted += 1;
+    });
+    req.resume();
+    return;
+  }
   const file = path.join(www, new URL(req.url, 'http://x').pathname);
   if (!file.startsWith(www) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
     res.writeHead(404).end();
@@ -101,6 +115,23 @@ await test('worker_terminate', async (page, ch) => {
   await page.evaluate(() => window.worker.terminate());
   const gone = await waitPresence(ch, 0, 10000);
   console.log(`     left ${gone} ms after terminate()`);
+});
+
+await test('hanging_post', async (page) => {
+  // Same origin as the page, so the POST needs no CORS; the stream is
+  // Centrifugo's.
+  const out = await page.evaluate(
+    (emu) => window.hangingPost('http://localhost:8010/connection/http_stream', emu),
+    `${base}/emulation-hang`,
+  );
+  const [result, ms] = [out.slice(0, out.lastIndexOf(' ')), Number(out.slice(out.lastIndexOf(' ') + 1))];
+  if (!result.includes('ClientDisconnected')) throw new Error(`send() ended with ${result}`);
+  if (!(ms < 1000)) throw new Error(`send() took ${ms} ms after the disconnect`);
+  // The browser cancelled the request, not just Rust forgetting it.
+  const t0 = Date.now();
+  while (hung.aborted < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 50));
+  if (hung.aborted < 1) throw new Error(`the server saw ${hung.open} requests, none aborted`);
+  console.log(`     send() failed ${ms} ms after the disconnect; the server saw the POST aborted`);
 });
 
 await within(10_000, 'closing the browser', browser.close()).catch((e) => console.log(`  ${e.message}`));

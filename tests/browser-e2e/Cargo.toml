@@ -10,8 +10,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-centrifuge-client = { path = "../../crates/centrifuge-client", default-features = false, features = ["json"] }
+centrifuge-client = { path = "../../crates/centrifuge-client", default-features = false, features = ["json", "http-stream"] }
 wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+js-sys = "0.3.77"
 
 [workspace]
 
