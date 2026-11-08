@@ -145,8 +145,11 @@ mod tests {
         for bad in [f64::NAN, f64::INFINITY, -1.0, 8.64e15 + 1.0, f64::MAX] {
             assert_eq!(system_time_from_ms(bad), None, "{bad}");
         }
-        // The largest valid `Date` is representable.
-        assert!(system_time_from_ms(8.64e15).is_some_and(|t| t > SystemTime::UNIX_EPOCH));
+        // Year 2100 is representable everywhere.
+        assert!(system_time_from_ms(4.1e12).is_some_and(|t| t > SystemTime::UNIX_EPOCH));
+        // The largest `Date` (year 275760) is past some platforms'
+        // `SystemTime` (Windows: year 30828): `None` there, never a panic.
+        let _ = system_time_from_ms(8.64e15);
     }
 
     #[test]
