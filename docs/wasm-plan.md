@@ -940,13 +940,23 @@ After `wasm-opt -Oz` (binaryen 133): 459 KB raw / 194 KB gzip / 162 KB
 brotli for the minimal build, 602 KB / 252 KB / 208 KB with the features
 above. It trims about 9% raw and nothing gzipped.
 
-Above the estimate: about 190–250 KB gzipped. Next: look at what dominates (`twiggy`; `url`'s IDNA tables,
-`tracing`, `prost` and formatting are the likely candidates), then set the
-soft CI budget from the result. Measure the real build
-in step 9, then set a soft CI budget from it (for example, warn when the
-gzipped size after `wasm-opt -Oz` grows more than 10% over the recorded
-baseline). It should be a warning, not a failure, and the baseline is
-updated deliberately.
+Above the estimate: about 190–250 KB gzipped. What it's made of (`twiggy`,
+the full build without the name section, 655 KB raw before `wasm-opt`):
+`.rodata` 144 KB, the core's code 110 KB, Rust's `core` and `alloc`
+135 KB, the client's code 58 KB, `serde_json` 33 KB (JSON only),
+`hashbrown` 23 KB, Tokio's `sync` 16 KB, `futures-util` 11 KB, `prost`
+9 KB.
+
+Most of `.rodata` is the ICU tables that `url` uses for Unicode domain names
+(IDNA): an app that pins `idna_adapter = "=1.0.0"` (ASCII-only domain names;
+the crate's documented switch) gets 494 KB raw / 206 KB gzip / 170 KB brotli
+instead of 602 / 252 / 208 KB, about 46 KB gzipped less. That goes in the
+docs (step 10) as an app's choice; the SDK doesn't make it, since it would
+refuse Unicode hosts for everyone. Not parsing URLs with `url` on wasm (the
+"Future optimization" below) would save the same for every app.
+
+The soft CI budget (a warning when the gzipped size after `wasm-opt -Oz` grows
+more than 10% over this baseline) is still to add.
 
 ## Order
 
