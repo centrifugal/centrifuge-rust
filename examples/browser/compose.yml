@@ -4,6 +4,9 @@
 #
 # then open http://localhost:8080 in two tabs. The first run compiles the
 # page and installs wasm-bindgen (a few minutes); Ctrl-C stops it.
+#
+# ../centrifugo.json lets any client connect and publish, without a token:
+# fine for a local demo, not for production.
 name: centrifuge-rust-example-browser
 
 services:

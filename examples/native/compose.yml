@@ -3,6 +3,9 @@
 #   docker compose -f examples/native/compose.yml up
 #
 # The first run compiles the example (a few minutes); Ctrl-C stops it.
+#
+# ../centrifugo.json lets any client connect and publish, without a token:
+# fine for a local demo, not for production.
 name: centrifuge-rust-example-native
 
 services:
