@@ -1,0 +1,67 @@
+# The browser (WASM) example with a real Centrifugo; needs only Docker:
+#
+#   docker compose -f examples/browser/compose.yml up
+#
+# then open http://localhost:8080 in two tabs. The first run compiles the
+# page and installs wasm-bindgen (a few minutes); Ctrl-C stops it.
+name: centrifuge-rust-example-browser
+
+services:
+  centrifugo:
+    image: centrifugo/centrifugo:v6.10.2
+    command: ["centrifugo", "--config=/centrifugo/config.json"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../centrifugo.json:/centrifugo/config.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/health"]
+      interval: 2s
+      retries: 15
+
+  # Builds the page: the Rust code to WebAssembly, then wasm-bindgen's
+  # JavaScript glue, at the wasm-bindgen version in Cargo.lock.
+  build:
+    image: rust:1
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - tools:/tools
+      - target:/target
+      - site:/site
+    environment:
+      CARGO_TARGET_DIR: /target
+    command:
+      - sh
+      - -ec
+      - |
+        rustup target add wasm32-unknown-unknown
+        v=$$(grep -A1 '^name = "wasm-bindgen"$$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+        if [ "$$(/tools/bin/wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $$v" ]; then
+          cargo install wasm-bindgen-cli --version "$$v" --locked --root /tools
+        fi
+        cargo build --locked -p browser-demo --target wasm32-unknown-unknown --release
+        /tools/bin/wasm-bindgen --target web --out-dir /site/pkg /target/wasm32-unknown-unknown/release/browser_demo.wasm
+        cp examples/browser/index.html /site/
+        echo
+        echo "  Open http://localhost:8080 in two tabs and chat."
+        echo
+
+  web:
+    image: nginx:1-alpine
+    depends_on:
+      build:
+        condition: service_completed_successfully
+      centrifugo:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    volumes:
+      - site:/usr/share/nginx/html:ro
+
+volumes:
+  cargo-registry:
+  tools:
+  target:
+  site:

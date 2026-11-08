@@ -6,7 +6,7 @@
 [![MSRV](https://img.shields.io/crates/msrv/centrifuge-client)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**[Quick start](#quick-start)** · [How it works](#how-it-works) · [Desktop apps and Tauri](#desktop-apps-and-tauri) · [In the browser (WASM)](#in-the-browser-wasm) · [Cargo features](#cargo-features) · [Compatibility](#compatibility) · [Differences from centrifuge-js](#differences-from-centrifuge-js) · [How it's tested](#how-its-tested) · [Contributing](#contributing)
+**[Try it](#try-it)** · [Quick start](#quick-start) · [How it works](#how-it-works) · [Desktop apps and Tauri](#desktop-apps-and-tauri) · [In the browser (WASM)](#in-the-browser-wasm) · [Cargo features](#cargo-features) · [Compatibility](#compatibility) · [Differences from centrifuge-js](#differences-from-centrifuge-js) · [How it's tested](#how-its-tested) · [Contributing](#contributing)
 
 The official Rust real-time client SDK for [Centrifugo](https://centrifugal.dev) and the [Centrifuge](https://github.com/centrifugal/centrifuge) library. Built for desktop apps (Tauri and others), browser apps (WASM), backend services, bots and tools that need a live connection.
 
@@ -25,6 +25,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 ```
 
 The package is `centrifuge-client`; the library is imported as `centrifuge`.
+
+## Try it
+
+Two examples run with a real Centrifugo, and need nothing but Docker:
+
+```sh
+docker compose -f examples/native/compose.yml up    # a Rust program that publishes and receives
+docker compose -f examples/browser/compose.yml up   # a chat page in Rust (WASM): open http://localhost:8080 in two tabs
+```
+
+The first run compiles the example, which takes a few minutes; Ctrl-C stops it. The code is in [`examples/hello.rs`](crates/centrifuge-client/examples/hello.rs) and [`examples/browser`](examples/browser).
 
 ## Quick start
 

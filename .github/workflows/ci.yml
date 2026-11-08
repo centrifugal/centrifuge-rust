@@ -110,6 +110,36 @@ jobs:
       - if: failure() || cancelled()
         run: docker compose logs --tail 200
 
+  # The two examples, as the README says to run them: docker compose with a
+  # real Centrifugo, nothing else (examples/native, examples/browser).
+  examples:
+    name: examples (docker compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Native example
+        run: |
+          docker compose -f examples/native/compose.yml up -d
+          for i in $(seq 1 90); do
+            if docker compose -f examples/native/compose.yml logs hello | grep -q 'received:'; then exit 0; fi
+            sleep 10
+          done
+          docker compose -f examples/native/compose.yml logs --tail 50
+          exit 1
+      - name: Browser example
+        run: |
+          docker compose -f examples/browser/compose.yml up -d --wait
+          cd tests/browser-e2e
+          npm ci --no-fund --no-audit
+          node demo.mjs
+      - if: failure() || cancelled()
+        run: |
+          docker compose -f examples/native/compose.yml logs --tail 100
+          docker compose -f examples/browser/compose.yml logs --tail 100
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -449,7 +479,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, browser, android, ios, deny, typos, zizmor]
+    needs: [fmt, clippy, test, real-server, examples, msrv, features, minimal-versions, docs, wasm-core, browser, android, ios, deny, typos, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

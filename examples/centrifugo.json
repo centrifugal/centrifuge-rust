@@ -1,0 +1,19 @@
+{
+  "client": {
+    "insecure": true,
+    "allowed_origins": [
+      "http://localhost:8080",
+      "http://127.0.0.1:8080"
+    ]
+  },
+  "channel": {
+    "without_namespace": {
+      "history_size": 50,
+      "history_ttl": "300s",
+      "force_recovery": true
+    }
+  },
+  "health": {
+    "enabled": true
+  }
+}
