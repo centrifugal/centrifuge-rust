@@ -936,8 +936,11 @@ connects and publishes; release, `opt-level = "z"`, LTO, one codegen unit,
 | the same, name section removed | 501 KB | 192 KB | — |
 | `json`, `http-stream`, `delta`, `serde`; name section removed | 655 KB | 250 KB | 207 KB |
 
-Above the estimate: about 190–250 KB gzipped before `wasm-opt`. Next: run
-`wasm-opt -Oz` and look at what dominates (`twiggy`; `url`'s IDNA tables,
+After `wasm-opt -Oz` (binaryen 133): 459 KB raw / 194 KB gzip / 162 KB
+brotli for the minimal build, 602 KB / 252 KB / 208 KB with the features
+above. It trims about 9% raw and nothing gzipped.
+
+Above the estimate: about 190–250 KB gzipped. Next: look at what dominates (`twiggy`; `url`'s IDNA tables,
 `tracing`, `prost` and formatting are the likely candidates), then set the
 soft CI budget from the result. Measure the real build
 in step 9, then set a soft CI budget from it (for example, warn when the
