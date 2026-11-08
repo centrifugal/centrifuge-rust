@@ -574,6 +574,26 @@ pub enum Input {
         /// How long the system slept.
         slept: Duration,
     },
+    /// A browser lifecycle event; native targets never send it.
+    Lifecycle(Lifecycle),
+}
+
+/// Browser lifecycle events, acted on as centrifuge-js does
+/// (docs/wasm-plan.md, step 7a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Lifecycle {
+    /// `offline`: the transport is closed, and the client is connecting.
+    Offline,
+    /// `online`: reconnect now instead of waiting out the backoff; after an
+    /// `Offline`, a transport opened meanwhile is replaced (mobile Safari may
+    /// never report it closed).
+    Online,
+    /// `pagehide` with `persisted`: the page enters the back/forward cache,
+    /// frozen; its transport is closed, so the server sees the client go.
+    PageHidden,
+    /// `pageshow` with `persisted`: the page is restored; reconnect now.
+    PageShown,
 }
 
 /// A transport to open.
@@ -850,6 +870,7 @@ impl Core {
             Input::DeliverNext => self.deliver_next(now, &mut out),
             Input::Delivered { ok, panic } => self.on_delivered(ok, panic, now, &mut out),
             Input::Resumed { slept } => self.on_resumed(slept, now, &mut out),
+            Input::Lifecycle(e) => self.on_lifecycle(e, now, &mut out),
         }
         self.pump(now, &mut out);
         self.stats.messages_out += out.commands.len() as u64;

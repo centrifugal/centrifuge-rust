@@ -120,6 +120,13 @@ mod web_sys_global {
         pub type Global;
         #[wasm_bindgen(method, js_name = setTimeout)]
         pub fn set_timeout(this: &Global, handler: &js_sys::Function, ms: i32) -> JsValue;
+        #[wasm_bindgen(method, js_name = dispatchEvent)]
+        pub fn dispatch_event(this: &Global, event: &Event) -> bool;
+
+        #[wasm_bindgen(extends = js_sys::Object)]
+        pub type Event;
+        #[wasm_bindgen(constructor)]
+        pub fn new(name: &str) -> Event;
     }
 }
 
@@ -218,4 +225,66 @@ async fn http_stream_disconnect_aborts_the_request() {
     );
     a.close().await;
     b.close().await;
+}
+
+/// Dispatches `name` on the global scope, with `persisted` for page events.
+fn dispatch(name: &str, persisted: Option<bool>) {
+    let e = web_sys_global::Event::new(name);
+    if let Some(p) = persisted {
+        js_sys::Reflect::set(&e, &"persisted".into(), &p.into()).unwrap();
+    }
+    let global: web_sys_global::Global = js_sys::global().unchecked_into();
+    global.dispatch_event(&e);
+}
+
+/// `offline` closes the transport (connecting, code 1); `online` reconnects
+/// at once, though the backoff is 10 s. Then the same for the back/forward
+/// cache: `pagehide` / `pageshow` with `persisted`.
+#[wasm_bindgen_test]
+async fn lifecycle_events_close_and_reconnect() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .event_delivery(EventDelivery::Inline)
+        .min_reconnect_delay(Duration::from_secs(10))
+        .max_reconnect_delay(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx2 = tx.clone();
+    c.on_connecting(move |_, e| {
+        let _ = tx.send(format!("connecting {} {}", e.code, e.reason));
+    });
+    c.on_connected(move |_, _| {
+        let _ = tx2.send("connected".to_owned());
+    });
+    c.connect().unwrap();
+    assert_eq!(rx.recv().await.unwrap(), "connecting 0 connect called");
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+
+    dispatch("offline", None);
+    assert_eq!(rx.recv().await.unwrap(), "connecting 1 transport closed");
+    let t0 = js_sys::Date::now();
+    dispatch("online", None);
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+    assert!(
+        js_sys::Date::now() - t0 < 2000.0,
+        "online waited for the backoff"
+    );
+
+    // A normal unload (`persisted` false) changes nothing.
+    dispatch("pagehide", Some(false));
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(c.state(), centrifuge::State::Connected);
+    dispatch("pagehide", Some(true));
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        "connecting 1 page entered back/forward cache"
+    );
+    let t0 = js_sys::Date::now();
+    dispatch("pageshow", Some(true));
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+    assert!(
+        js_sys::Date::now() - t0 < 2000.0,
+        "pageshow waited for the backoff"
+    );
+    c.close().await;
 }

@@ -50,7 +50,7 @@ rustls-pki-types = "1.12"
 js-sys = "0.3.77"
 wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = "0.4.50"
-web-sys = { version = "0.3.77", features = ["AbortController", "AbortSignal", "BinaryType", "CloseEvent", "Event", "Headers", "MessageEvent", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "Response", "WebSocket"] }
+web-sys = { version = "0.3.77", features = ["AbortController", "AbortSignal", "BinaryType", "CloseEvent", "Event", "EventTarget", "Headers", "MessageEvent", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "Response", "WebSocket"] }
 web-time = "1.1"
 
 # `centrifuge::android` names jni types; the same version rustls-platform-verifier uses.

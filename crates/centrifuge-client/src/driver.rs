@@ -94,6 +94,10 @@ pub(crate) struct Driver {
     /// Token and state callbacks in flight, aborted on shutdown.
     tasks: Vec<rt::AbortHandle>,
     finished: bool,
+    /// Browser lifecycle listeners, feeding `callbacks`; removed with the
+    /// driver.
+    #[cfg(target_arch = "wasm32")]
+    _lifecycle: Option<crate::lifecycle::Listeners>,
 }
 
 impl Drop for Driver {
@@ -131,6 +135,8 @@ impl Driver {
         let (inbound_tx, inbound) = mpsc::channel(READ_AHEAD_ITEMS);
         let stop = shared.stop.subscribe();
         let (callbacks_tx, callbacks) = mpsc::unbounded_channel();
+        #[cfg(target_arch = "wasm32")]
+        let lifecycle = crate::lifecycle::Listeners::attach(&callbacks_tx);
         Self {
             core,
             shared,
@@ -151,6 +157,8 @@ impl Driver {
             stop,
             tasks: Vec::new(),
             finished: false,
+            #[cfg(target_arch = "wasm32")]
+            _lifecycle: lifecycle,
         }
     }
 

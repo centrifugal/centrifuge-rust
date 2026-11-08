@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–7 are done: the client works in a browser over WebSocket and HTTP-streaming.
+Status: in progress. Steps 1–7a are done: the client works in a browser over WebSocket and HTTP-streaming, and acts on network and back/forward cache events.
 
 ## Summary
 
@@ -756,6 +756,20 @@ cache in Chrome through Playwright (bfcache enabled; Playwright turns it
 off by default), as in centrifuge-js#445: the server sees the disconnect
 right after navigating away, and the client reconnects, with recovery, on
 going back.
+
+**Result (done).** The core has `Input::Lifecycle(Lifecycle)` with
+`Offline`, `Online`, `PageHidden`, `PageShown`, and the centrifuge-js rules
+(including its "went offline" and "page cached" flags, which the app's own
+`disconnect()` clears); "reconnect now" acts only while a backoff wait is
+running, so an attempt in progress or a token callback is never doubled.
+Core unit tests cover each rule. `lifecycle.rs` puts the four listeners on
+the global scope and feeds the driver's input channel. One change from the
+sketch above: the driver owns the listeners, so they're removed when the
+client is closed or dropped, not on each disconnect; while disconnected the
+core ignores the events, so the behavior is the same. A browser test
+dispatches the events in Chrome: with a 10 s backoff, `online` and
+`pageshow` reconnect within 2 s, and `pagehide` without `persisted` changes
+nothing. The real back/forward cache (Playwright, bfcache on) is step 9.
 
 ### 8. Public API and configuration (non-breaking)
 

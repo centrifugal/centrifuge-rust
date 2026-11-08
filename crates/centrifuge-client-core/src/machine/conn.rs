@@ -51,6 +51,10 @@ pub(super) struct Conn {
     pub(super) tried_all: bool,
     /// The last attempt failed on an unproven transport: retry at once.
     pub(super) immediate: bool,
+    /// Browser lifecycle: `Offline` closed the transport (until `Online`).
+    pub(super) went_offline: bool,
+    /// Browser lifecycle: `PageHidden` closed it (until `PageShown`).
+    pub(super) page_cached: bool,
 }
 
 impl Conn {
@@ -74,6 +78,8 @@ impl Conn {
             transport_was_open: false,
             tried_all: false,
             immediate: false,
+            went_offline: false,
+            page_cached: false,
         }
     }
 
@@ -135,6 +141,9 @@ impl Core {
 
     pub(super) fn op_disconnect(&mut self, now: Instant, out: &mut Outputs) {
         self.disconnects += 1;
+        // The app's own disconnect ends what a lifecycle event started.
+        self.conn.went_offline = false;
+        self.conn.page_cached = false;
         if matches!(self.state, State::Connecting | State::Connected) {
             self.teardown(
                 disconnected::DISCONNECT_CALLED,
@@ -1009,6 +1018,62 @@ impl Core {
                 }
                 self.timers.arm_after(TimerKey::NoPing, now, window);
             }
+        }
+    }
+
+    /// A browser lifecycle event (docs/wasm-plan.md, step 7a).
+    pub(super) fn on_lifecycle(&mut self, e: super::Lifecycle, now: Instant, out: &mut Outputs) {
+        use super::Lifecycle;
+        match e {
+            Lifecycle::Offline | Lifecycle::PageHidden => {
+                if !matches!(self.state, State::Connecting | State::Connected) {
+                    return;
+                }
+                let reason = if e == Lifecycle::Offline {
+                    self.conn.went_offline = true;
+                    "transport closed"
+                } else {
+                    self.conn.page_cached = true;
+                    "page entered back/forward cache"
+                };
+                if let Some(t) = self.conn.current.as_ref().map(|t| t.id) {
+                    self.transport_lost(t, connecting::TRANSPORT_CLOSED, reason, now, out);
+                }
+            }
+            Lifecycle::Online => {
+                let went_offline = std::mem::take(&mut self.conn.went_offline);
+                if self.state != State::Connecting {
+                    return;
+                }
+                if went_offline {
+                    // Opened while offline: it may never report closed.
+                    if let Some(t) = self.conn.current.as_ref().map(|t| t.id) {
+                        self.transport_lost(
+                            t,
+                            connecting::TRANSPORT_CLOSED,
+                            "transport closed",
+                            now,
+                            out,
+                        );
+                    }
+                }
+                self.reconnect_now(now, out);
+            }
+            Lifecycle::PageShown => {
+                let cached = std::mem::take(&mut self.conn.page_cached);
+                if cached && self.state == State::Connecting {
+                    self.reconnect_now(now, out);
+                }
+            }
+        }
+    }
+
+    /// Skips the backoff wait, if one is running; an attempt in progress (a
+    /// transport opening, a token callback) carries on.
+    fn reconnect_now(&mut self, now: Instant, out: &mut Outputs) {
+        if self.timers.deadline(TimerKey::Reconnect).is_some() {
+            self.timers.cancel(TimerKey::Reconnect);
+            self.start_attempt(now, out);
         }
     }
 

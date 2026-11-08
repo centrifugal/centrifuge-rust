@@ -65,6 +65,8 @@ mod dispatch;
 mod driver;
 mod error;
 mod events;
+#[cfg(target_arch = "wasm32")]
+mod lifecycle;
 mod maybe_send;
 mod platform;
 mod rt;

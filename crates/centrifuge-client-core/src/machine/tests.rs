@@ -1855,3 +1855,105 @@ fn backoff_jitter_with_huge_bounds_does_not_overflow() {
         let _ = super::timers::backoff(&mut r, attempt, Duration::MAX, Duration::MAX);
     }
 }
+
+fn connecting_reason(events: &[Event]) -> Option<(u32, String)> {
+    events.iter().find_map(|e| match e {
+        Event::Connecting { code, reason } => Some((*code, reason.clone())),
+        _ => None,
+    })
+}
+
+/// `offline` closes the transport (code 1); `online` reconnects at once
+/// instead of waiting out the backoff (docs/wasm-plan.md, step 7a).
+#[test]
+fn offline_closes_and_online_reconnects_at_once() {
+    let mut h = H::json();
+    let t = h.connect();
+    h.take_events();
+    h.step(Input::Lifecycle(Lifecycle::Offline));
+    assert_eq!(h.core.state(), State::Connecting);
+    assert_eq!(
+        connecting_reason(&h.take_events()),
+        Some((1, "transport closed".into()))
+    );
+    assert!(h.closes.contains(&t));
+    let opens = h.opens.len();
+    h.step(Input::Lifecycle(Lifecycle::Online));
+    assert_eq!(h.opens.len(), opens + 1, "a new attempt at once");
+    assert!(h.core.timers.deadline(TimerKey::Reconnect).is_none());
+}
+
+/// While disconnected, lifecycle events do nothing; `online` doesn't start a
+/// second attempt while one is in progress.
+#[test]
+fn lifecycle_events_respect_the_state() {
+    let mut h = H::json();
+    for e in [
+        Lifecycle::Offline,
+        Lifecycle::Online,
+        Lifecycle::PageHidden,
+        Lifecycle::PageShown,
+    ] {
+        h.step(Input::Lifecycle(e));
+    }
+    assert_eq!(h.core.state(), State::Disconnected);
+    assert!(h.opens.is_empty() && h.take_events().is_empty());
+
+    // Connecting, the transport opening: `online` without a prior `offline`
+    // leaves it alone.
+    h.op(Op::Connect);
+    let opens = h.opens.len();
+    h.step(Input::Lifecycle(Lifecycle::Online));
+    assert_eq!(h.opens.len(), opens);
+    assert_eq!(h.closes, Vec::<TransportId>::new());
+}
+
+/// An attempt opened while offline is replaced on `online`: mobile Safari
+/// may never report it closed.
+#[test]
+fn online_replaces_a_transport_opened_while_offline() {
+    let mut h = H::json();
+    h.connect();
+    h.step(Input::Lifecycle(Lifecycle::Offline));
+    // The backoff runs out while still offline: an attempt opens.
+    h.advance(Duration::from_secs(30));
+    let offline_attempt = h.last_open().transport;
+    let opens = h.opens.len();
+    h.step(Input::Lifecycle(Lifecycle::Online));
+    assert!(h.closes.contains(&offline_attempt));
+    assert_eq!(h.opens.len(), opens + 1);
+    assert_ne!(h.last_open().transport, offline_attempt);
+}
+
+/// `pagehide` (persisted) closes with its own reason; `pageshow` reconnects at
+/// once, only after a `pagehide`.
+#[test]
+fn back_forward_cache_closes_and_restores() {
+    let mut h = H::json();
+    h.connect();
+    h.take_events();
+    h.step(Input::Lifecycle(Lifecycle::PageShown));
+    assert_eq!(h.core.state(), State::Connected, "pageshow alone: nothing");
+    h.step(Input::Lifecycle(Lifecycle::PageHidden));
+    assert_eq!(
+        connecting_reason(&h.take_events()),
+        Some((1, "page entered back/forward cache".into()))
+    );
+    let opens = h.opens.len();
+    h.step(Input::Lifecycle(Lifecycle::PageShown));
+    assert_eq!(h.opens.len(), opens + 1, "reconnects at once");
+}
+
+/// The app's own `disconnect()` ends what `offline` started: a later
+/// `online` doesn't reconnect a client the app disconnected.
+#[test]
+fn disconnect_clears_the_lifecycle_flags() {
+    let mut h = H::json();
+    h.connect();
+    h.step(Input::Lifecycle(Lifecycle::Offline));
+    h.op(Op::Disconnect);
+    let opens = h.opens.len();
+    h.step(Input::Lifecycle(Lifecycle::Online));
+    assert_eq!(h.core.state(), State::Disconnected);
+    assert_eq!(h.opens.len(), opens);
+}
