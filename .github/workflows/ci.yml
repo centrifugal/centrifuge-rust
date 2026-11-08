@@ -219,7 +219,7 @@ jobs:
           fail_ci_if_error: false
 
   wasm-core:
-    name: core builds for wasm32
+    name: builds for wasm32
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -237,6 +237,71 @@ jobs:
       - run: cargo check -p centrifuge-client-core --target wasm32-unknown-unknown --locked
         env:
           RUSTFLAGS: -D warnings
+      # The client in a browser (docs/wasm-plan.md): with and without
+      # HTTP-streaming, and the browser test target.
+      - run: cargo clippy -p centrifuge-client --target wasm32-unknown-unknown --lib --test browser --locked -- -D warnings
+      - run: cargo clippy -p centrifuge-client --target wasm32-unknown-unknown --lib --no-default-features --features json --locked -- -D warnings
+      # No native-only crate reaches the browser build, and no blocking Tokio
+      # API is used on its path.
+      - name: Native-only crates stay out of the wasm graph
+        run: |
+          tree=$(cargo tree -p centrifuge-client --target wasm32-unknown-unknown -e normal --prefix none --locked)
+          if echo "$tree" | grep -E '^(mio|hyper|hyper-util|rustls|tokio-rustls|tokio-tungstenite|rustls-platform-verifier|getrandom) '; then
+            exit 1
+          fi
+      - name: No blocking Tokio APIs
+        run: |
+          if grep -rnE 'spawn_blocking|block_in_place|blocking_(lock|recv|send)' crates/centrifuge-client/src; then
+            exit 1
+          fi
+
+  browser:
+    name: browser tests (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: browser
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The test runner must match the wasm-bindgen version in Cargo.lock.
+      - name: wasm-bindgen version
+        id: wb
+        run: echo "version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+      - run: docker compose up -d --wait
+      # The runner image ships each browser with its matching driver.
+      - name: Driver
+        run: |
+          if [ "$BROWSER" = chrome ]; then
+            echo "CHROMEDRIVER=$CHROMEWEBDRIVER/chromedriver" >> "$GITHUB_ENV"
+          else
+            echo "GECKODRIVER=$GECKOWEBDRIVER/geckodriver" >> "$GITHUB_ENV"
+          fi
+        env:
+          BROWSER: ${{ matrix.browser }}
+      # browser.rs runs in the page, worker.rs in a Dedicated Worker.
+      - run: cargo test -p centrifuge-client --target wasm32-unknown-unknown --test browser --test worker --locked
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          # The ping test stays connected for 40 s.
+          WASM_BINDGEN_TEST_TIMEOUT: "90"
+      - if: failure() || cancelled()
+        run: docker compose logs --tail 200
 
   # Build only: the platform verifier's API differs on mobile (docs/spec.md §5.2).
   # cargo-ndk points aws-lc-rs's C build at the runner's NDK (ANDROID_NDK_HOME).
@@ -356,7 +421,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, android, ios, deny, typos, zizmor]
+    needs: [fmt, clippy, test, real-server, msrv, features, minimal-versions, docs, wasm-core, browser, android, ios, deny, typos, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

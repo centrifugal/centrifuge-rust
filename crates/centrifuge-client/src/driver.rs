@@ -63,7 +63,7 @@ pub(crate) struct DriverConfig {
     pub(crate) max_message_size: usize,
     pub(crate) get_token: Option<ConnTokenGetter>,
     /// The browser `fetch` credentials mode.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
     pub(crate) credentials: crate::config::Credentials,
 }
 
@@ -493,7 +493,7 @@ impl Driver {
             budget: self.budget.clone(),
             last_received: self.last_received.clone(),
             closing: closing_rx,
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
             credentials: self.cfg.credentials,
         };
         let task = rt::spawn(transport::run(ctx, req.initial));

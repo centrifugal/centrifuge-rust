@@ -345,3 +345,70 @@ async fn http_stream_with_credentials() {
         .expect("an emulation request with credentials");
     c.close().await;
 }
+
+/// A WebSocket endpoint that fails (404) falls back to HTTP-streaming.
+#[wasm_bindgen_test]
+async fn falls_back_to_http_stream() {
+    let c = Client::builder_with_transports([
+        TransportEndpoint::websocket("ws://localhost:8010/connection/missing"),
+        endpoint(true),
+    ])
+    .min_reconnect_delay(Duration::from_millis(50))
+    .build()
+    .unwrap();
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(10)))
+        .await
+        .expect("connected");
+    assert_eq!(
+        c.statistics().transport,
+        Some(centrifuge::TransportKind::HttpStream)
+    );
+    c.close().await;
+}
+
+/// A server close with a terminal code (3500, invalid token, from the
+/// secure Centrifugo) reaches the app as the server sent it: disconnected,
+/// no reconnect.
+#[wasm_bindgen_test]
+async fn server_close_code_is_terminal() {
+    let c = Client::builder_with_transports([TransportEndpoint::websocket(
+        "ws://localhost:8012/connection/websocket",
+    )])
+    .token("not-a-jwt")
+    .build()
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.on_disconnected(move |_, e| {
+        let _ = tx.send((e.code, e.reason.clone()));
+    });
+    c.connect().unwrap();
+    let (code, reason) = rx.recv().await.unwrap();
+    assert_eq!((code, reason.as_str()), (3500, "invalid token"));
+    assert_eq!(c.state(), centrifuge::State::Disconnected);
+    c.close().await;
+}
+
+/// Nothing listening: the browser fires `error`, then `close` (1006). One
+/// transport error per attempt, and the client keeps reconnecting.
+#[wasm_bindgen_test]
+async fn refused_connection_reconnects() {
+    let c = Client::builder_with_transports([TransportEndpoint::websocket(
+        "ws://localhost:1/connection/websocket",
+    )])
+    .min_reconnect_delay(Duration::from_millis(100))
+    .max_reconnect_delay(Duration::from_millis(100))
+    .build()
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.on_error(move |_, e| {
+        let _ = tx.send(e.error.to_string());
+    });
+    c.connect().unwrap();
+    for _ in 0..2 {
+        let e = rx.recv().await.unwrap();
+        assert!(e.contains("1006") || e.contains("WebSocket"), "{e}");
+    }
+    assert_eq!(c.state(), centrifuge::State::Connecting);
+    c.close().await;
+}

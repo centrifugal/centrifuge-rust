@@ -82,6 +82,8 @@ fn truncate(mut s: String, max: usize) -> String {
 
 /// What failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The fetch cases are unused without HTTP-streaming.
+#[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
 pub(crate) enum Failure {
     /// `fetch()` rejected: a network failure, or CORS, which a browser
     /// reports as the same generic error.

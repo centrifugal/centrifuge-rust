@@ -184,7 +184,7 @@ pub(crate) struct Ctx {
     /// Set by the driver to close this transport's writer gracefully.
     pub(crate) closing: watch::Receiver<bool>,
     /// The browser `fetch` credentials mode.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
     pub(crate) credentials: crate::config::Credentials,
 }
 

@@ -1018,7 +1018,7 @@ impl ClientBuilder {
                 emulation_endpoint,
                 max_message_size: self.max_message_size,
                 get_token: self.get_token,
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
                 credentials: self.credentials.unwrap_or_default(),
             },
             dispatcher,
