@@ -1,6 +1,7 @@
 {
   "client": {
     "insecure": true,
+    "allowed_origins": ["*"],
     "concurrency": 8,
     "token": {
       "hmac_secret_key": "secret"
