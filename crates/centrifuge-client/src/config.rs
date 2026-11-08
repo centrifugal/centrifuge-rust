@@ -51,18 +51,56 @@ impl TransportEndpoint {
 }
 
 /// Where event handlers run (docs/spec.md §9.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// The default depends on the target: [`Thread`](Self::Thread) natively,
+/// [`Inline`](Self::Inline) on `wasm32`, which has no threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventDelivery {
-    /// A dedicated thread per client (the default). A handler that blocks stalls
-    /// only this client's events, never the async runtime, and blocking on a
-    /// call from a handler works. If the thread can't be started,
-    /// [`ClientBuilder::build`](crate::ClientBuilder::build) fails.
-    #[default]
+    /// A dedicated thread per client (the native default). A handler that
+    /// blocks stalls only this client's events, never the async runtime, and
+    /// blocking on a call from a handler works. If the thread can't be
+    /// started, [`ClientBuilder::build`](crate::ClientBuilder::build) fails;
+    /// on `wasm32` it always does.
     Thread,
     /// On the client's own task: no extra thread, for tools running thousands
-    /// of clients. Handlers must not block.
+    /// of clients, and the only mode in a browser. Handlers must not block: in
+    /// a browser they run on the page's event loop, so a slow one also delays
+    /// incoming messages, timers and the page itself.
     Inline,
+}
+
+impl Default for EventDelivery {
+    fn default() -> Self {
+        if cfg!(target_arch = "wasm32") {
+            Self::Inline
+        } else {
+            Self::Thread
+        }
+    }
+}
+
+/// Whether a browser's HTTP-streaming requests carry cookies and HTTP
+/// authentication (the `fetch` `credentials` mode). Browser only (`wasm32`);
+/// no effect on other targets, which send no ambient credentials (set
+/// headers with [`ClientBuilder::http_headers`](crate::ClientBuilder::http_headers)
+/// there).
+///
+/// A browser `WebSocket` always sends the target's cookies; `fetch` sends them
+/// as this says. So a cookie-authenticated app on another origin than the
+/// server needs [`Include`](Self::Include) for HTTP-streaming (fallback
+/// included), and the server's CORS setup must allow credentials. A token
+/// (`token` / `get_token`) works the same over both transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Credentials {
+    /// Only to the page's own origin (the browser's default).
+    #[default]
+    SameOrigin,
+    /// Also cross-origin.
+    Include,
+    /// Never.
+    Omit,
 }
 
 /// Credentials for a proxy. `Debug` never prints the password.
@@ -148,7 +186,10 @@ impl<F: Fn(&Url) -> ProxyTarget + MaybeSend + MaybeSync> ProxyFn for F {}
 /// The function of [`ProxyConfig::Custom`]: opaque, build it with
 /// [`ProxyConfig::custom`].
 #[derive(Clone)]
-pub struct CustomProxy(pub(crate) Arc<dyn ProxyFn>);
+// A browser picks the proxy itself: never read on wasm32.
+pub struct CustomProxy(
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] pub(crate) Arc<dyn ProxyFn>,
+);
 
 impl std::fmt::Debug for CustomProxy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -248,13 +289,19 @@ impl std::fmt::Debug for ProxyConfig {
     }
 }
 
+// rustls re-exports these; wasm has no rustls (docs/wasm-plan.md, step 1).
+#[cfg(not(target_arch = "wasm32"))]
+use rustls::pki_types;
+#[cfg(target_arch = "wasm32")]
+use rustls_pki_types as pki_types;
+
 /// TLS configuration (docs/spec.md §5.2). The default verifies with the OS
 /// trust store and its settings (`rustls-platform-verifier`).
 #[derive(Clone, Default)]
 pub struct TlsConfig {
-    pub(crate) extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    pub(crate) extra_roots: Vec<pki_types::CertificateDer<'static>>,
     pub(crate) accept_invalid: bool,
-    #[cfg(feature = "rustls-config")]
+    #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
     pub(crate) custom: Option<Arc<rustls::ClientConfig>>,
 }
 
@@ -286,9 +333,9 @@ impl TlsConfig {
     ///
     /// [`Error::Configuration`] if the PEM holds no certificate or can't be parsed.
     pub fn add_root_pem(mut self, pem: &[u8]) -> Result<Self, Error> {
-        use rustls::pki_types::pem::PemObject as _;
+        use pki_types::pem::PemObject as _;
         let before = self.extra_roots.len();
-        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+        for cert in pki_types::CertificateDer::pem_slice_iter(pem) {
             self.extra_roots.push(
                 cert.map_err(|e| Error::Configuration(format!("invalid PEM certificate: {e}")))?,
             );
@@ -314,7 +361,7 @@ impl TlsConfig {
     /// `danger_accept_invalid_certs`.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn uses_platform_verifier(&self) -> bool {
-        #[cfg(feature = "rustls-config")]
+        #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
         if self.custom.is_some() {
             return false;
         }
@@ -327,7 +374,7 @@ impl TlsConfig {
     /// It replaces the OS verifier: roots from [`add_root_pem`](Self::add_root_pem)
     /// are ignored, and on Android no `centrifuge::android::init_*` call is
     /// needed.
-    #[cfg(feature = "rustls-config")]
+    #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
     #[must_use]
     pub fn rustls_client_config(cfg: rustls::ClientConfig) -> Self {
         Self {

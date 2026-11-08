@@ -6,7 +6,9 @@
 [![MSRV](https://img.shields.io/crates/msrv/centrifuge-client)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The official Rust real-time client SDK for [Centrifugo](https://centrifugal.dev) and the [Centrifuge](https://github.com/centrifugal/centrifuge) library. Built for desktop apps (Tauri and others), backend services, bots and tools that need a live connection.
+**[Try it](#try-it)** · [Quick start](#quick-start) · [How it works](#how-it-works) · [Desktop apps and Tauri](#desktop-apps-and-tauri) · [In the browser (WASM)](#in-the-browser-wasm) · [Cargo features](#cargo-features) · [Compatibility](#compatibility) · [Differences from centrifuge-js](#differences-from-centrifuge-js) · [How it's tested](#how-its-tested) · [Contributing](#contributing)
+
+The official Rust real-time client SDK for [Centrifugo](https://centrifugal.dev) and the [Centrifuge](https://github.com/centrifugal/centrifuge) library. Built for desktop apps (Tauri and others), browser apps (WASM), backend services, bots and tools that need a live connection.
 
 - **Transports:** WebSocket, and HTTP-streaming fallback.
 - **Protocols:** Protobuf (the default) and JSON.
@@ -23,6 +25,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 ```
 
 The package is `centrifuge-client`; the library is imported as `centrifuge`.
+
+## Try it
+
+Two examples run with a real Centrifugo, and need nothing but Docker:
+
+```sh
+docker compose -f examples/native/compose.yml up    # a Rust program that publishes and receives
+docker compose -f examples/browser/compose.yml up   # a chat page in Rust (WASM): open http://localhost:8080 in two tabs
+```
+
+The first run compiles the example, which takes a few minutes; Ctrl-C stops it. The code is in [`examples/hello.rs`](crates/centrifuge-client/examples/hello.rs) and [`examples/browser`](examples/browser).
 
 ## Quick start
 
@@ -179,6 +192,29 @@ use tauri::{Emitter as _, Manager as _};
 
 [`examples/desktop_app.rs`](crates/centrifuge-client/examples/desktop_app.rs) shows the same patterns without a GUI dependency.
 
+### In the browser (WASM)
+
+The same client works in the browser, compiled to WebAssembly: in a page or in a Web Worker, over WebSocket or HTTP-streaming. The API is the same, so the code you write for the desktop works there too:
+
+```rust
+let client = centrifuge::Client::builder("wss://example.com/connection/websocket")
+    .token(token)
+    .on_connected(|_, _| web_sys::console::log_1(&"connected".into()))
+    .build()?;
+client.connect()?;
+```
+
+A few things work differently, because the browser is in charge:
+
+- **Keep handlers quick.** They run on the page's own thread, so a slow handler makes the page and the connection lag.
+- **No proxy, TLS or custom HTTP header settings.** The browser handles these itself, and setting them is an error. If your Centrifugo proxy handlers need headers (a connect proxy to your backend, say), send them with `emulated_headers()`: Centrifugo forwards them to the proxy when its `emulated_headers` option lists them.
+- **Allow your site on the server.** Add your page's origin to Centrifugo's `client.allowed_origins`, or the connection is refused. If the page and Centrifugo are on different domains, HTTP-streaming also needs CORS.
+- **Prefer a token for authentication.** A token works the same over both transports. If you rely on cookies and Centrifugo is on another domain, set `credentials(Credentials::Include)`, or HTTP-streaming won't send them.
+- **Network changes are handled for you.** The client reconnects as soon as the device is back online, and disconnects cleanly when the user navigates away from the page.
+- **Size.** About 200–250 KB gzipped. If you only connect to plain ASCII host names, add `idna_adapter = "=1.0.0"` to your app's dependencies to save about 46 KB.
+
+Tested in Chrome and Firefox. Service Workers aren't supported.
+
 ## Cargo features
 
 | Feature | Default | What it does |
@@ -197,7 +233,7 @@ use tauri::{Emitter as _, Manager as _};
 
 - **Protocol:** the Centrifugo client protocol v2 (Centrifugo v4 and newer). HTTP-streaming needs Centrifugo v5 or newer with `http_stream` enabled. Tested against Centrifugo v6.10.
 - **Runtime:** Tokio (multi-thread or current-thread).
-- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). A browser (wasm) build is planned: the core already builds for `wasm32-unknown-unknown`.
+- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). Browsers (`wasm32-unknown-unknown`): Chrome and Firefox, tested in CI (see [In the browser (WASM)](#in-the-browser-wasm)).
 - **MSRV:** Rust 1.85. Raising it is a minor-version change, noted in the [changelog](CHANGELOG.md).
 
 ## Differences from centrifuge-js

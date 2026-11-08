@@ -2,7 +2,9 @@
 //! earliest one and reports it back with [`super::Input::TimerFired`].
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 use super::SubKey;
 

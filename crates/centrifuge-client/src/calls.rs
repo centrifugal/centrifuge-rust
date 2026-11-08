@@ -12,8 +12,9 @@ use centrifuge_client_core::machine::{State, SubState, TransportId};
 use centrifuge_client_core::proto;
 use tokio::sync::oneshot;
 
-use crate::dispatch::{in_callback, in_handler};
+use crate::dispatch::in_handler;
 use crate::error::Error;
+use crate::rt::{self, in_callback};
 use crate::shared::{Shared, SubInner, lock};
 use crate::transport::WriteReq;
 
@@ -105,7 +106,7 @@ const LATE: Duration = Duration::from_secs(1);
 async fn wait_ready(
     shared: &Shared,
     sub: Option<&SubInner>,
-    deadline: tokio::time::Instant,
+    deadline: rt::Instant,
 ) -> Result<(), Error> {
     let seq = shared
         .requested_seq
@@ -175,7 +176,7 @@ async fn wait_ready(
                 None => rx.changed().await.is_ok(),
             }
         };
-        match tokio::time::timeout_at(deadline, changed).await {
+        match rt::timeout_at(deadline, changed).await {
             Ok(true) => {}
             Ok(false) => return Err(Error::ClientClosed),
             Err(_) => return Err(Error::Timeout),
@@ -190,7 +191,7 @@ pub(crate) async fn call(
     mut cmd: proto::Command,
 ) -> Result<proto::Reply, Error> {
     let timeout = shared.cfg.timeout;
-    let deadline = tokio::time::Instant::now() + timeout.min(crate::config::MAX_DURATION);
+    let deadline = rt::Instant::now() + timeout.min(crate::config::MAX_DURATION);
     wait_ready(shared, sub, deadline).await?;
     let session = shared
         .snapshot
@@ -226,17 +227,17 @@ pub(crate) async fn call(
 
 async fn wait_reply(
     mut rx: oneshot::Receiver<Result<proto::Reply, Error>>,
-    deadline: tokio::time::Instant,
+    deadline: rt::Instant,
 ) -> Result<proto::Reply, Error> {
     tokio::select! {
         biased;
         r = &mut rx => return r.unwrap_or(Err(Error::ClientDisconnected)),
-        () = tokio::time::sleep_until(deadline) => {}
+        () = rt::sleep_until(deadline) => {}
     }
     // A reply already received wins over the timeout (pattern 28); a timer that
     // ran far too late gets one grace period.
-    if tokio::time::Instant::now().duration_since(deadline) >= LATE {
-        if let Ok(r) = tokio::time::timeout(LATE, &mut rx).await {
+    if rt::Instant::now().duration_since(deadline) >= LATE {
+        if let Ok(r) = rt::timeout(LATE, &mut rx).await {
             return r.unwrap_or(Err(Error::ClientDisconnected));
         }
     } else if let Ok(r) = rx.try_recv() {
@@ -248,8 +249,7 @@ async fn wait_reply(
 /// `send()`: fire and forget (no reply), resolves once written to a connected
 /// transport.
 pub(crate) async fn send(shared: &Arc<Shared>, cmd: proto::Command) -> Result<(), Error> {
-    let deadline =
-        tokio::time::Instant::now() + shared.cfg.timeout.min(crate::config::MAX_DURATION);
+    let deadline = rt::Instant::now() + shared.cfg.timeout.min(crate::config::MAX_DURATION);
     wait_ready(shared, None, deadline).await?;
     let session = shared
         .snapshot
@@ -263,7 +263,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, cmd: proto::Command) -> Result<()
         .writer
         .send(WriteReq::send(cmd, &session, tx))
         .map_err(|_| Error::ClientDisconnected)?;
-    match tokio::time::timeout_at(deadline, rx).await {
+    match rt::timeout_at(deadline, rx).await {
         Ok(Ok(written)) => written,
         // The transport went away with it queued.
         Ok(Err(_)) => Err(Error::ClientDisconnected),
@@ -311,9 +311,7 @@ pub(crate) async fn client_ready(shared: &Shared, timeout: Option<Duration>) -> 
         }
     };
     match timeout {
-        Some(t) => tokio::time::timeout(t, fut)
-            .await
-            .unwrap_or(Err(Error::Timeout)),
+        Some(t) => rt::timeout(t, fut).await.unwrap_or(Err(Error::Timeout)),
         None => fut.await,
     }
 }
@@ -365,9 +363,7 @@ pub(crate) async fn sub_ready(
         }
     };
     match timeout {
-        Some(t) => tokio::time::timeout(t, fut)
-            .await
-            .unwrap_or(Err(Error::Timeout)),
+        Some(t) => rt::timeout(t, fut).await.unwrap_or(Err(Error::Timeout)),
         None => fut.await,
     }
 }

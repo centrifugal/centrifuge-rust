@@ -20,8 +20,8 @@
 //! starting) produce no input; their outputs are matched against what the
 //! core already produced.
 
+use crate::time::Instant;
 use std::collections::HashMap;
-use std::time::Instant;
 
 use serde_json::Value;
 

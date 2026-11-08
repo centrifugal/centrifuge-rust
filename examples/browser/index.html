@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Centrifugo chat in Rust (WASM)</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  #status { color: #666; }
+  #messages { list-style: none; padding: 0; min-height: 10rem; border: 1px solid #ddd; border-radius: 6px; padding: .5rem 1rem; }
+  form { display: flex; gap: .5rem; margin-top: 1rem; }
+  input { flex: 1; font: inherit; padding: .4rem .6rem; }
+  button { font: inherit; padding: .4rem 1rem; }
+</style>
+<h1>Chat</h1>
+<p>Rust in your browser (WebAssembly), talking to Centrifugo. Open this page in a second tab and chat with yourself.</p>
+<p id="status">loading…</p>
+<ul id="messages"></ul>
+<form id="form">
+  <input id="text" placeholder="Say something" autocomplete="off" autofocus>
+  <button>Send</button>
+</form>
+<script type="module">
+  import init, { Chat } from './pkg/browser_demo.js';
+  await init();
+  const messages = document.getElementById('messages');
+  const status = document.getElementById('status');
+  const chat = new Chat(
+    'ws://localhost:8000/connection/websocket',
+    'chat',
+    (data) => {
+      const li = document.createElement('li');
+      li.textContent = JSON.parse(data).text;
+      messages.append(li);
+    },
+    (s) => { status.textContent = s; },
+  );
+  document.getElementById('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('text');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    try {
+      await chat.send(JSON.stringify({ text }));
+    } catch (err) {
+      status.textContent = `send failed: ${err}`;
+    }
+  });
+</script>
+</html>

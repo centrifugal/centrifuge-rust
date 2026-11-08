@@ -2,18 +2,33 @@
 //! bidirectional emulation. Each transport has a reader (in its open task) and
 //! a writer task; the driver only sees [`Inbound`] messages.
 
+mod browser_error;
 #[cfg(feature = "http-stream")]
+mod http_common;
+#[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
 mod http_stream;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod net;
+// The browser connects by itself: only the settings the shared code reads.
+#[cfg(target_arch = "wasm32")]
+#[path = "net_wasm.rs"]
+pub(crate) mod net;
+#[cfg(all(feature = "http-stream", target_arch = "wasm32"))]
+mod web_http;
+#[cfg(target_arch = "wasm32")]
+mod web_ws;
+#[cfg(not(target_arch = "wasm32"))]
 mod ws;
+mod ws_close;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use centrifuge_client_core::codec::{self, DecodeError, Protocol};
 use centrifuge_client_core::machine::{CloseReason, TransportId, TransportKind};
 use centrifuge_client_core::proto;
+// The real monotonic clock, as the driver's watchdog reads.
+use centrifuge_client_core::time::Instant;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use url::Url;
 
@@ -140,6 +155,11 @@ impl LastReceived {
     }
 }
 
+/// Whether `url` is connected with TLS.
+pub(crate) fn uses_tls(url: &Url) -> bool {
+    matches!(url.scheme(), "wss" | "https")
+}
+
 /// Everything a transport needs; cheap to clone per attempt.
 #[derive(Clone)]
 pub(crate) struct Ctx {
@@ -148,11 +168,14 @@ pub(crate) struct Ctx {
     pub(crate) url: Url,
     pub(crate) protocol: Protocol,
     pub(crate) max_message_size: usize,
+    // A page can't set them, and the browser connects: never read on wasm32.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) http_headers: http::HeaderMap,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) emulation_endpoint: Option<Url>,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) timeout: std::time::Duration,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) net: Arc<net::Net>,
     pub(crate) shared: Arc<Shared>,
     pub(crate) inbound: mpsc::Sender<Inbound>,
@@ -160,6 +183,9 @@ pub(crate) struct Ctx {
     pub(crate) last_received: Arc<LastReceived>,
     /// Set by the driver to close this transport's writer gracefully.
     pub(crate) closing: watch::Receiver<bool>,
+    /// The browser `fetch` credentials mode.
+    #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
+    pub(crate) credentials: crate::config::Credentials,
 }
 
 impl Ctx {
@@ -222,9 +248,14 @@ impl std::fmt::Debug for Ctx {
 /// aborts the open or the read (patterns 34, 51).
 pub(crate) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
     match ctx.kind {
+        #[cfg(not(target_arch = "wasm32"))]
         TransportKind::WebSocket => ws::run(ctx).await,
-        #[cfg(feature = "http-stream")]
+        #[cfg(target_arch = "wasm32")]
+        TransportKind::WebSocket => web_ws::run(ctx).await,
+        #[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
         TransportKind::HttpStream => http_stream::run(ctx, initial).await,
+        #[cfg(all(feature = "http-stream", target_arch = "wasm32"))]
+        TransportKind::HttpStream => web_http::run(ctx, initial).await,
         #[allow(unreachable_patterns)]
         _ => {
             let _ = initial;

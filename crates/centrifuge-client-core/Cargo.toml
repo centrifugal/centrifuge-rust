@@ -21,6 +21,10 @@ prost = { version = "0.14.4", default-features = false, features = ["std", "deri
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.140", features = ["raw_value"], optional = true }
 
+# A clock type for wasm32 (`time::Instant`); not built elsewhere.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 hex = "0.4"

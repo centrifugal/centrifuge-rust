@@ -53,6 +53,8 @@
 //! guide and the [design](https://github.com/centrifugal/centrifuge-rust/blob/main/docs/spec.md)
 //! for the exact behaviour.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The same `Arc`s as native: on wasm their contents needn't be `Send`.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -63,7 +65,11 @@ mod dispatch;
 mod driver;
 mod error;
 mod events;
+#[cfg(target_arch = "wasm32")]
+mod lifecycle;
 mod maybe_send;
+mod platform;
+mod rt;
 mod shared;
 mod stats;
 mod stream;
@@ -80,8 +86,8 @@ pub use centrifuge_client_core::types::{
 };
 pub use client::{Client, ClientBuilder, ConnectionTokenContext, WeakClient};
 pub use config::{
-    CustomProxy, EventDelivery, Protocol, ProxyAuth, ProxyConfig, ProxyTarget, TlsConfig,
-    TransportEndpoint, TransportKind,
+    Credentials, CustomProxy, EventDelivery, Protocol, ProxyAuth, ProxyConfig, ProxyTarget,
+    TlsConfig, TransportEndpoint, TransportKind,
 };
 pub use error::{
     ArcError, BoxError, ClientError, ClientErrorKind, Error, ServerError, SubscriptionError,

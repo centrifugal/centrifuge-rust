@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -31,19 +32,9 @@ thread_local! {
     static IN_HANDLER: Cell<u64> = const { Cell::new(0) };
 }
 
-tokio::task_local! {
-    /// The client whose token or state callback this task runs (§9.5).
-    pub(crate) static IN_CALLBACK: u64;
-}
-
 /// Whether the current thread runs a handler of client `id`.
 pub(crate) fn in_handler(id: u64) -> bool {
     IN_HANDLER.with(Cell::get) == id
-}
-
-/// Whether the current task runs a token or state callback of client `id`.
-pub(crate) fn in_callback(id: u64) -> bool {
-    IN_CALLBACK.try_with(|c| *c == id).unwrap_or(false)
 }
 
 struct HandlerScope(u64);
@@ -60,7 +51,7 @@ impl Drop for HandlerScope {
     }
 }
 
-type H<T, E> = Option<Box<dyn FnMut(&T, E) + Send>>;
+type H<T, E> = Option<Box<crate::maybe_send::dyn_send!(FnMut(&T, E))>>;
 
 /// Client handler slots. A handler is taken out while it runs, so registering
 /// one from inside a handler is safe (the Rust form of pattern 32).
@@ -542,6 +533,7 @@ fn hand_off<T>((tx, tail): &Offerer<T>, item: T, waits: &mut Pending, _blocking:
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// One event for the dispatcher thread; it answers with the result and the
 /// stream acks still to wait for.
 pub(crate) struct Batch {
@@ -551,6 +543,7 @@ pub(crate) struct Batch {
 
 /// Where batches go.
 pub(crate) enum Dispatcher {
+    #[cfg(not(target_arch = "wasm32"))]
     Thread {
         tx: std::sync::mpsc::Sender<Batch>,
         /// The thread is gone: that was reported once, and events are now
@@ -562,15 +555,18 @@ pub(crate) enum Dispatcher {
 }
 
 /// Starts a thread; a parameter so tests can make it fail.
+#[cfg(not(target_arch = "wasm32"))]
 type Spawn = fn(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn os_spawn(b: std::thread::Builder, f: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
     b.spawn(f).map(drop)
 }
 
 /// Starts the `centrifuge-events` thread. Without it no event would ever be
 /// delivered, so a failure is an error for `build()`, not a log line. On
-/// targets without threads (wasm32-unknown-unknown) spawning always fails.
+/// targets without threads spawning fails.
+#[cfg(not(target_arch = "wasm32"))]
 fn start_event_thread(spawn: Spawn, f: Box<dyn FnOnce() + Send>) -> Result<(), crate::Error> {
     let builder = std::thread::Builder::new().name("centrifuge-events".into());
     spawn(builder, f).map_err(|e| {
@@ -582,11 +578,13 @@ fn start_event_thread(spawn: Spawn, f: Box<dyn FnOnce() + Send>) -> Result<(), c
 }
 
 /// Why the batch in which the event thread stopped doesn't count as delivered.
+#[cfg(not(target_arch = "wasm32"))]
 const THREAD_GONE: &str =
     "the event thread is gone (an SDK bug); later events are delivered on the client's task";
 
 /// The event thread stopped taking events. Handler panics are caught, so only
 /// an SDK bug gets here. Marks it gone and logs; true only the first time.
+#[cfg(not(target_arch = "wasm32"))]
 fn thread_gone(gone: &AtomicBool) -> bool {
     let first = !gone.swap(true, Ordering::Relaxed);
     if first {
@@ -607,6 +605,7 @@ impl Dispatcher {
     ///
     /// [`Error::Configuration`](crate::Error::Configuration) if the event
     /// thread can't be started.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(
         mode: EventDelivery,
         delivery: Delivery,
@@ -615,6 +614,25 @@ impl Dispatcher {
         Self::with_spawn(mode, delivery, runtime, os_spawn)
     }
 
+    /// No threads in a browser: events are delivered on the client's task.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Configuration`](crate::Error::Configuration) for
+    /// [`EventDelivery::Thread`].
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new(mode: EventDelivery, delivery: Delivery) -> Result<Self, crate::Error> {
+        match mode {
+            EventDelivery::Inline => Ok(Self::Inline(delivery)),
+            EventDelivery::Thread => Err(crate::Error::Configuration(
+                "EventDelivery::Thread needs threads, which wasm32 doesn't have; \
+                 use EventDelivery::Inline"
+                    .into(),
+            )),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn with_spawn(
         mode: EventDelivery,
         delivery: Delivery,
@@ -659,9 +677,11 @@ impl Dispatcher {
         let mut res = BatchResult::default();
         for ev in events {
             let (r, waits) = match self {
+                #[cfg(not(target_arch = "wasm32"))]
                 Self::Thread { gone, fallback, .. } if gone.load(Ordering::Relaxed) => {
                     run_inline(fallback, ev)
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 Self::Thread { tx, gone, fallback } => {
                     let (done, rx) = oneshot::channel();
                     match tx.send(Batch {

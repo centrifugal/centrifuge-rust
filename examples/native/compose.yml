@@ -1,0 +1,41 @@
+# The native example with a real Centrifugo; needs only Docker:
+#
+#   docker compose -f examples/native/compose.yml up
+#
+# The first run compiles the example (a few minutes); Ctrl-C stops it.
+#
+# ../centrifugo.json lets any client connect and publish, without a token:
+# fine for a local demo, not for production.
+name: centrifuge-rust-example-native
+
+services:
+  centrifugo:
+    image: centrifugo/centrifugo:v6.10.2
+    command: ["centrifugo", "--config=/centrifugo/config.json"]
+    volumes:
+      - ../centrifugo.json:/centrifugo/config.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/health"]
+      interval: 2s
+      retries: 15
+
+  hello:
+    image: rust:1
+    depends_on:
+      centrifugo:
+        condition: service_healthy
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - target:/target
+    environment:
+      CARGO_TARGET_DIR: /target
+      CENTRIFUGO_URL: ws://centrifugo:8000/connection/websocket
+    command: ["cargo", "run", "--locked", "-p", "centrifuge-client", "--example", "hello"]
+    # Ctrl-C reaches the example as SIGINT, so it closes cleanly.
+    stop_signal: SIGINT
+
+volumes:
+  cargo-registry:
+  target:

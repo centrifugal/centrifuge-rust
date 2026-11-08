@@ -212,7 +212,7 @@ crates/centrifuge-client/     the SDK users depend on (lib name `centrifuge`)
 | Linux, macOS, Windows | supported | none | none | CI: tests on all three, the real-Centrifugo suite on Linux |
 | iOS | supported | none | none | CI: `aarch64-apple-ios` build (all, default and ring-only features); not run in CI |
 | Android | supported | for TLS through the OS verifier: `centrifuge::android::init_*` plus the verifier's Kotlin component (§5.2). Not needed for plain `ws://`/`http://`, a custom `rustls::ClientConfig` or `danger_accept_invalid_certs` | extra roots (`TlsConfig::add_root_pem`) | CI: build for arm64-v8a, armeabi-v7a and x86_64 (three feature sets); not run in CI; a downstream app reported a run on an emulator (arm64-v8a, API 36) |
-| Browser (`wasm32-unknown-unknown`) | planned, phase 3 (§9.11) | none planned | planned: explicit `proxy`, `tls` and `http_headers`, `EventDelivery::Thread` | CI: the core builds for wasm32; the client doesn't yet |
+| Browser (`wasm32-unknown-unknown`) | supported: Chrome, Firefox; a page or a Dedicated Worker (§9.11, `docs/wasm-plan.md`) | none; the server allows the page's origin | explicit `proxy`, `tls` and `http_headers`, `EventDelivery::Thread` | CI: lints; the browser suite in headless Chrome and Firefox against Centrifugo, in a page and a Dedicated Worker; back/forward cache and `worker.terminate()` through Playwright (Chrome) |
 
 **Platform rules.** Every platform follows them, so a new one adds a row,
 not new principles:

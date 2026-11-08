@@ -18,8 +18,8 @@ use url::Url;
 
 use crate::calls;
 use crate::config::{
-    EventDelivery, ProxyConfig, TlsConfig, TransportEndpoint, check_http_headers, defaults,
-    duration,
+    Credentials, EventDelivery, ProxyConfig, TlsConfig, TransportEndpoint, check_http_headers,
+    defaults, duration,
 };
 use crate::dispatch::{ClientHandlers, Delivery, Dispatcher, in_handler};
 use crate::driver::{ConnTokenGetter, Driver, DriverConfig, TokenFuture};
@@ -34,7 +34,7 @@ use crate::shared::{CallConfig, Command, Shared, lock};
 use crate::stats::Statistics;
 use crate::stream::EventStream;
 use crate::subscription::{Subscription, SubscriptionBuilder};
-use crate::transport::net::{Net, uses_tls};
+use crate::transport::net::Net;
 
 /// Passed to the connection token getter. Empty for now; it may carry more
 /// context later.
@@ -247,16 +247,18 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Configuration`] for headers the transport manages (`Host`,
-    /// `Upgrade`, `Sec-WebSocket-*`, …).
+    /// `Upgrade`, `Sec-WebSocket-*`, …), and in a browser for any header (a
+    /// page can't set them; an empty map is accepted).
     pub fn set_http_headers(&self, headers: http::HeaderMap) -> Result<(), Error> {
         check_http_headers(&headers)?;
+        crate::platform::check_http_headers_set(!headers.is_empty())?;
         *lock(&self.inner.shared.http_headers) = headers;
         Ok(())
     }
 
-    /// Replaces the headers sent inside the connect command from the next
-    /// connect attempt (Centrifugo `emulated_headers`; for environments that
-    /// can't set real headers).
+    /// Replaces the headers sent inside the connect command, which Centrifugo
+    /// forwards to its proxy handlers (its `emulated_headers` option), from
+    /// the next connect attempt.
     ///
     /// # Errors
     ///
@@ -270,8 +272,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Never for now; the `Result` leaves room for validation.
+    /// [`Error::Configuration`] in a browser for any proxy but
+    /// [`ProxyConfig::System`]: the browser decides there.
     pub fn set_proxy(&self, proxy: ProxyConfig) -> Result<(), Error> {
+        crate::platform::check_proxy(&proxy)?;
         *lock(&self.inner.shared.net.proxy) = proxy;
         Ok(())
     }
@@ -626,6 +630,7 @@ client_handlers! {
 #[must_use = "a builder does nothing until build() is called"]
 pub struct ClientBuilder {
     endpoints: Vec<TransportEndpoint>,
+    #[cfg(not(target_arch = "wasm32"))]
     runtime: Option<tokio::runtime::Handle>,
     protocol: Protocol,
     token: String,
@@ -644,6 +649,16 @@ pub struct ClientBuilder {
     max_message_size: usize,
     tls: TlsConfig,
     proxy: ProxyConfig,
+    /// `tls()` / `proxy()` were called: an explicit setting that a platform
+    /// can't serve fails `build()`, while the default is best effort.
+    tls_set: bool,
+    proxy_set: bool,
+    // Only the browser's `fetch` reads it.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", feature = "http-stream")),
+        allow(dead_code)
+    )]
+    credentials: Option<Credentials>,
     event_delivery: EventDelivery,
     handlers: ClientHandlers,
 }
@@ -665,6 +680,7 @@ impl ClientBuilder {
     fn new(endpoints: Vec<TransportEndpoint>) -> Self {
         Self {
             endpoints,
+            #[cfg(not(target_arch = "wasm32"))]
             runtime: None,
             protocol: Protocol::default(),
             token: String::new(),
@@ -683,6 +699,9 @@ impl ClientBuilder {
             max_message_size: defaults::MAX_MESSAGE_SIZE,
             tls: TlsConfig::default(),
             proxy: ProxyConfig::default(),
+            tls_set: false,
+            proxy_set: false,
+            credentials: None,
             event_delivery: EventDelivery::default(),
             handlers: ClientHandlers::default(),
         }
@@ -690,7 +709,9 @@ impl ClientBuilder {
 
     /// The Tokio runtime to run on. Default: the current one at `build()`.
     /// Needed where `build()` runs outside a runtime (Tauri setup hooks:
-    /// `tauri::async_runtime::handle()`).
+    /// `tauri::async_runtime::handle()`). Native only: a browser has no Tokio
+    /// runtime.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn runtime(mut self, handle: tokio::runtime::Handle) -> Self {
         self.runtime = Some(handle);
         self
@@ -751,14 +772,21 @@ impl ClientBuilder {
     }
 
     /// Real HTTP headers: on the WebSocket upgrade, the HTTP-stream request
-    /// and every emulation request.
+    /// and every emulation request. Not in a browser, which doesn't let a
+    /// page set them on a WebSocket: `build()` fails there. Headers meant for
+    /// Centrifugo's proxy handlers can go in
+    /// [`emulated_headers`](Self::emulated_headers) instead.
     pub fn http_headers(mut self, headers: http::HeaderMap) -> Self {
         self.http_headers = headers;
         self
     }
 
-    /// Headers sent inside the connect command (Centrifugo
-    /// `emulated_headers`).
+    /// Headers sent inside the connect command (Centrifugo's headers
+    /// emulation). Centrifugo forwards them to its proxy handlers when its
+    /// `emulated_headers` option lists them; unlike
+    /// [`http_headers`](Self::http_headers), they aren't HTTP headers, so
+    /// neither Centrifugo nor anything in front of it sees them as such.
+    /// Works in browsers too.
     pub fn emulated_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.emulated_headers = headers;
         self
@@ -808,19 +836,34 @@ impl ClientBuilder {
         self
     }
 
-    /// TLS configuration. Default: the OS trust store.
+    /// TLS configuration. Default: the OS trust store. Not in a browser, which
+    /// verifies by itself: setting it fails `build()` there.
     pub fn tls(mut self, tls: TlsConfig) -> Self {
         self.tls = tls;
+        self.tls_set = true;
         self
     }
 
-    /// Proxy configuration. Default: [`ProxyConfig::System`].
+    /// Proxy configuration. Default: [`ProxyConfig::System`], which in a
+    /// browser means "the browser decides". Setting it in a browser fails
+    /// `build()`.
     pub fn proxy(mut self, proxy: ProxyConfig) -> Self {
         self.proxy = proxy;
+        self.proxy_set = true;
         self
     }
 
-    /// Where event handlers run. Default: [`EventDelivery::Thread`].
+    /// The browser `fetch` credentials mode for HTTP-streaming. Default:
+    /// [`Credentials::SameOrigin`]. Browser only: other targets have no
+    /// ambient credentials for it to include or omit, so it has no effect
+    /// there, and cross-platform code can set it unconditionally.
+    pub fn credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// Where event handlers run. Default: [`EventDelivery::Thread`] natively,
+    /// [`EventDelivery::Inline`] on `wasm32`.
     pub fn event_delivery(mut self, mode: EventDelivery) -> Self {
         self.event_delivery = mode;
         self
@@ -876,6 +919,7 @@ impl ClientBuilder {
     #[allow(clippy::too_many_lines)] // validation, then wiring; clearer in one place
     pub fn build(self) -> Result<Client, Error> {
         let endpoints = self.endpoints()?;
+        #[cfg(not(target_arch = "wasm32"))]
         let runtime = match self.runtime.clone() {
             Some(h) => h,
             None => tokio::runtime::Handle::try_current().map_err(|_| {
@@ -926,15 +970,17 @@ impl ClientBuilder {
             }
             None => None,
         };
-        // A TLS endpoint or proxy can't work without the verifier's setup, so
-        // say so here instead of retrying forever (docs/spec.md §5.2).
-        #[cfg(target_os = "android")]
-        let needs_tls = configured_tls(&endpoints, emulation_endpoint.as_ref(), &self.proxy);
+        crate::platform::check_build(&crate::platform::BuildCheck {
+            endpoints: &endpoints,
+            emulation: emulation_endpoint.as_ref(),
+            proxy: &self.proxy,
+            tls: &self.tls,
+            proxy_set: self.proxy_set,
+            tls_set: self.tls_set,
+            http_headers: !self.http_headers.is_empty(),
+            event_delivery: self.event_delivery,
+        })?;
         let net = Arc::new(Net::new(self.proxy, &self.tls, self.handshake_timeout)?);
-        #[cfg(target_os = "android")]
-        if needs_tls {
-            net.android_tls_ready().map_err(Error::Configuration)?;
-        }
 
         let core = Core::new(CoreConfig {
             protocol: self.protocol,
@@ -951,7 +997,7 @@ impl ClientBuilder {
             max_reconnect_delay: self.max_reconnect_delay,
             max_server_ping_delay: self.max_server_ping_delay,
             max_message_size: self.max_message_size,
-            seed: random_seed(),
+            seed: crate::rt::random_seed(),
         });
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -972,7 +1018,10 @@ impl ClientBuilder {
             client: Arc::downgrade(&inner),
             shared: shared.clone(),
         };
+        #[cfg(not(target_arch = "wasm32"))]
         let dispatcher = Dispatcher::new(self.event_delivery, delivery, runtime.clone())?;
+        #[cfg(target_arch = "wasm32")]
+        let dispatcher = Dispatcher::new(self.event_delivery, delivery)?;
         let driver = Driver::new(
             core,
             shared,
@@ -981,49 +1030,22 @@ impl ClientBuilder {
                 emulation_endpoint,
                 max_message_size: self.max_message_size,
                 get_token: self.get_token,
+                #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]
+                credentials: self.credentials.unwrap_or_default(),
             },
             dispatcher,
             rx,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         runtime.spawn(driver.run());
+        #[cfg(target_arch = "wasm32")]
+        crate::rt::spawn(driver.run());
         Ok(Client { inner })
     }
 }
 
-/// Seeds backoff jitter differently per client and process, so many clients
-/// restarted together don't reconnect in lockstep.
-fn random_seed() -> u64 {
-    use std::hash::{BuildHasher as _, Hasher as _};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    );
-    h.finish()
-}
-
-/// Whether a connection known at `build()` uses TLS: a `wss`/`https`
-/// endpoint, an `https` emulation endpoint (only HTTP-streaming uses it), or an
-/// explicit `https` proxy. Proxies from the environment, the OS, a custom
-/// function or `set_proxy` are only known per connection attempt, and are
-/// checked there. Android refuses these at `build()` until the verifier's setup
-/// (docs/spec.md §5.2).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn configured_tls(
-    endpoints: &[(TransportKind, Url)],
-    emulation: Option<&Url>,
-    proxy: &ProxyConfig,
-) -> bool {
-    let streaming = endpoints
-        .iter()
-        .any(|(k, _)| *k == TransportKind::HttpStream);
-    endpoints.iter().any(|(_, u)| uses_tls(u))
-        || (streaming && emulation.is_some_and(uses_tls))
-        || matches!(proxy, ProxyConfig::Http { url, .. } if uses_tls(url))
-}
-
+// The native contract; on wasm, handlers and futures needn't be `Send`.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 fn _assert_traits() {
     fn send_sync<T: Send + Sync>() {}
@@ -1034,58 +1056,23 @@ fn _assert_traits() {
     send_sync::<DisconnectedEvent>();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ProxyConfig, TransportKind, Url, configured_tls};
-
-    fn ep(kind: TransportKind, url: &str) -> (TransportKind, Url) {
-        (kind, Url::parse(url).unwrap())
-    }
-
-    #[test]
-    fn configured_tls_covers_endpoints_emulation_and_proxy() {
-        let ws = ep(TransportKind::WebSocket, "ws://h/connection/websocket");
-        let wss = ep(TransportKind::WebSocket, "wss://h/connection/websocket");
-        let http = ep(TransportKind::HttpStream, "http://h/connection/http-stream");
-        let https = ep(
-            TransportKind::HttpStream,
-            "https://h/connection/http-stream",
-        );
-        let tls_emu = Url::parse("https://h/emulation").unwrap();
-        let plain_emu = Url::parse("http://h/emulation").unwrap();
-        let none = ProxyConfig::None;
-        let tls_proxy = ProxyConfig::http(Url::parse("https://proxy:3128").unwrap(), None);
-        let plain_proxy = ProxyConfig::http(Url::parse("http://proxy:3128").unwrap(), None);
-
-        assert!(!configured_tls(std::slice::from_ref(&ws), None, &none));
-        assert!(configured_tls(&[wss], None, &none));
-        assert!(configured_tls(&[https], None, &none));
-        assert!(!configured_tls(
-            std::slice::from_ref(&http),
-            Some(&plain_emu),
-            &none
-        ));
-        // A plain stream endpoint with an HTTPS emulation endpoint still uses TLS.
-        assert!(configured_tls(
-            std::slice::from_ref(&http),
-            Some(&tls_emu),
-            &none
-        ));
-        assert!(configured_tls(&[ws.clone(), http], Some(&tls_emu), &none));
-        // Without HTTP-streaming, the emulation endpoint is never used.
-        assert!(!configured_tls(
-            std::slice::from_ref(&ws),
-            Some(&tls_emu),
-            &none
-        ));
-        // An explicit HTTPS proxy is TLS even for ws:// endpoints.
-        assert!(configured_tls(std::slice::from_ref(&ws), None, &tls_proxy));
-        assert!(!configured_tls(
-            std::slice::from_ref(&ws),
-            None,
-            &plain_proxy
-        ));
-        // Proxies only known per attempt are checked at connect time instead.
-        assert!(!configured_tls(&[ws], None, &ProxyConfig::System));
-    }
+/// The futures the SDK returns are `Send` natively, so they can be spawned
+/// on a multi-threaded runtime (only checked here, never run).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn _assert_send_futures(c: &Client, s: &crate::Subscription) {
+    fn send<T: Send>(_: &T) {}
+    send(&c.close());
+    send(&c.ready(None));
+    send(&c.rpc("m", ""));
+    send(&c.send(""));
+    send(&c.publish("ch", ""));
+    send(&c.history("ch", crate::HistoryOptions::new()));
+    send(&c.presence("ch"));
+    send(&c.presence_stats("ch"));
+    send(&s.ready(None));
+    send(&s.publish(""));
+    send(&s.history(crate::HistoryOptions::new()));
+    send(&s.presence());
+    send(&s.presence_stats());
 }

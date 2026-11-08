@@ -13,7 +13,9 @@ pub struct Statistics {
     pub state: State,
     /// The transport in use, while connected.
     pub transport: Option<TransportKind>,
-    /// When the current connection was established.
+    /// When the current connection was established. In a browser, to the
+    /// millisecond (`Date.now()`), and `None` if the browser's clock gives
+    /// an invalid time.
     pub connected_since: Option<SystemTime>,
     /// Successful connects, including reconnects.
     pub connects: u64,

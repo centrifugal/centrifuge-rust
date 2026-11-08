@@ -1,0 +1,485 @@
+//! Browser smoke test (docs/wasm-plan.md, step 6): headless Chrome against
+//! the real Centrifugo from `docker compose up`. Run with:
+//!
+//! ```text
+//! CHROMEDRIVER=/path/to/chromedriver \
+//! CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+//! cargo test -p centrifuge-client --target wasm32-unknown-unknown --test browser
+//! ```
+//!
+//! Set `WASM_BINDGEN_TEST_TIMEOUT=90`: the ping test takes 40 s.
+#![cfg(target_arch = "wasm32")]
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code
+
+use std::time::Duration;
+
+use centrifuge::{Client, EventDelivery, Protocol, TransportEndpoint};
+use wasm_bindgen::JsCast as _;
+use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+
+wasm_bindgen_test_configure!(run_in_browser);
+
+const WS: &str = "ws://localhost:8010/connection/websocket";
+const HTTP_STREAM: &str = "http://localhost:8010/connection/http_stream";
+
+fn endpoint(http_stream: bool) -> TransportEndpoint {
+    if http_stream {
+        TransportEndpoint::http_stream(HTTP_STREAM)
+    } else {
+        TransportEndpoint::websocket(WS)
+    }
+}
+
+async fn connect_subscribe_publish(protocol: Protocol, http_stream: bool) {
+    let client = Client::builder_with_transports([endpoint(http_stream)])
+        .protocol(protocol)
+        .event_delivery(EventDelivery::Inline)
+        .build()
+        .unwrap();
+    let channel = format!("recovery:browser_{}", js_sys::Date::now());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sub = client
+        .new_subscription(&channel)
+        .on_publication(move |_, e| {
+            let _ = tx.send(String::from_utf8_lossy(&e.data).into_owned());
+        })
+        .build()
+        .unwrap();
+    sub.subscribe();
+    client.connect().unwrap();
+    client
+        .ready(Some(Duration::from_secs(5)))
+        .await
+        .expect("connected");
+    sub.ready(Some(Duration::from_secs(5)))
+        .await
+        .expect("subscribed");
+    sub.publish(r#"{"n":1}"#).await.expect("published");
+    // The runner's own timeout bounds this wait.
+    assert_eq!(rx.recv().await.as_deref(), Some(r#"{"n":1}"#));
+    let h = sub
+        .history(centrifuge::HistoryOptions::new().all())
+        .await
+        .unwrap();
+    assert_eq!(h.publications.len(), 1);
+    client.close().await;
+    assert_eq!(client.state(), centrifuge::State::Closed);
+}
+
+#[wasm_bindgen_test]
+async fn websocket_protobuf() {
+    connect_subscribe_publish(Protocol::Protobuf, false).await;
+}
+
+#[wasm_bindgen_test]
+async fn websocket_json() {
+    connect_subscribe_publish(Protocol::Json, false).await;
+}
+
+/// Cross-origin `fetch` (the test page isn't on Centrifugo's origin): the
+/// stream request and every emulation POST go through a CORS preflight.
+#[wasm_bindgen_test]
+async fn http_stream_protobuf() {
+    connect_subscribe_publish(Protocol::Protobuf, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn http_stream_json() {
+    connect_subscribe_publish(Protocol::Json, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn http_stream_reconnect_recovers() {
+    reconnect_recovers(true).await;
+}
+
+fn client(protocol: Protocol, http_stream: bool) -> Client {
+    Client::builder_with_transports([endpoint(http_stream)])
+        .protocol(protocol)
+        .event_delivery(EventDelivery::Inline)
+        .min_reconnect_delay(Duration::from_millis(50))
+        .build()
+        .unwrap()
+}
+
+/// Waits `d` on the browser's event loop.
+async fn sleep(d: Duration) {
+    let ms = i32::try_from(d.as_millis()).unwrap();
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        let global: web_sys_global::Global = js_sys::global().unchecked_into();
+        global.set_timeout(&resolve, ms);
+    });
+    wasm_bindgen_futures::JsFuture::from(p).await.unwrap();
+}
+
+mod web_sys_global {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        pub type Global;
+        #[wasm_bindgen(method, js_name = setTimeout)]
+        pub fn set_timeout(this: &Global, handler: &js_sys::Function, ms: i32) -> JsValue;
+        #[wasm_bindgen(method, js_name = dispatchEvent)]
+        pub fn dispatch_event(this: &Global, event: &Event) -> bool;
+
+        #[wasm_bindgen(extends = js_sys::Object)]
+        pub type Event;
+        #[wasm_bindgen(constructor)]
+        pub fn new(name: &str) -> Event;
+    }
+}
+
+#[wasm_bindgen_test]
+async fn reconnect_recovers_missed_publications() {
+    reconnect_recovers(false).await;
+}
+
+async fn reconnect_recovers(http_stream: bool) {
+    let c = client(Protocol::Protobuf, http_stream);
+    let channel = format!("recovery:browser_r_{}", js_sys::Date::now());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx2 = tx.clone();
+    let sub = c
+        .new_subscription(&channel)
+        .recoverable(true)
+        .on_subscribed(move |_, e| {
+            let _ = tx2.send(format!("subscribed recovered={}", e.recovered));
+        })
+        .on_publication(move |_, e| {
+            let _ = tx.send(format!("pub {}", String::from_utf8_lossy(&e.data)));
+        })
+        .build()
+        .unwrap();
+    sub.subscribe();
+    c.connect().unwrap();
+    assert_eq!(rx.recv().await.unwrap(), "subscribed recovered=false");
+    sub.publish("1").await.unwrap();
+    assert_eq!(rx.recv().await.unwrap(), "pub 1");
+
+    c.disconnect();
+    // Another client publishes while this one is away.
+    let other = client(Protocol::Json, http_stream);
+    other.connect().unwrap();
+    for n in ["2", "3"] {
+        other.publish(&channel, n).await.unwrap();
+    }
+    other.close().await;
+
+    c.connect().unwrap();
+    assert_eq!(rx.recv().await.unwrap(), "subscribed recovered=true");
+    assert_eq!(rx.recv().await.unwrap(), "pub 2");
+    assert_eq!(rx.recv().await.unwrap(), "pub 3");
+    c.close().await;
+}
+
+/// Centrifugo pings every 25 s; without pong handling the client would see
+/// no ping within its 35 s window and reconnect.
+#[wasm_bindgen_test]
+async fn stays_connected_across_pings() {
+    let c = client(Protocol::Protobuf, false);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.on_disconnected(move |_, e| {
+        let _ = tx.send(format!("disconnected {} {}", e.code, e.reason));
+    });
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(5))).await.unwrap();
+    sleep(Duration::from_secs(40)).await;
+    assert_eq!(c.state(), centrifuge::State::Connected);
+    assert!(rx.try_recv().is_err(), "{:?}", rx.try_recv());
+    // The client answered the server's pings in the meantime.
+    assert!(c.statistics().messages_out >= 2, "{:?}", c.statistics());
+    c.close().await;
+}
+
+/// Disconnecting aborts the stream's `fetch`: the server sees the client go
+/// at once, not after its ping timeout (about 25 s). Presence shows it.
+#[wasm_bindgen_test]
+async fn http_stream_disconnect_aborts_the_request() {
+    // Presence is on for channels without a namespace.
+    let channel = format!("browser_p_{}", js_sys::Date::now());
+    let a = client(Protocol::Protobuf, true);
+    let sa = a.new_subscription(&channel).build().unwrap();
+    sa.subscribe();
+    a.connect().unwrap();
+    sa.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let b = client(Protocol::Protobuf, false);
+    let sb = b.new_subscription(&channel).build().unwrap();
+    sb.subscribe();
+    b.connect().unwrap();
+    sb.ready(Some(Duration::from_secs(5))).await.unwrap();
+    assert_eq!(sb.presence().await.unwrap().clients.len(), 2);
+
+    a.disconnect();
+    let mut left = false;
+    for _ in 0..20 {
+        sleep(Duration::from_millis(100)).await;
+        if sb.presence().await.unwrap().clients.len() == 1 {
+            left = true;
+            break;
+        }
+    }
+    assert!(
+        left,
+        "the server still sees the disconnected client after 2 s"
+    );
+    a.close().await;
+    b.close().await;
+}
+
+/// Dispatches `name` on the global scope, with `persisted` for page events.
+fn dispatch(name: &str, persisted: Option<bool>) {
+    let e = web_sys_global::Event::new(name);
+    if let Some(p) = persisted {
+        js_sys::Reflect::set(&e, &"persisted".into(), &p.into()).unwrap();
+    }
+    let global: web_sys_global::Global = js_sys::global().unchecked_into();
+    global.dispatch_event(&e);
+}
+
+/// `offline` closes the transport (connecting, code 1); `online` reconnects
+/// at once, though the backoff is 10 s. Then the same for the back/forward
+/// cache: `pagehide` / `pageshow` with `persisted`.
+#[wasm_bindgen_test]
+async fn lifecycle_events_close_and_reconnect() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .event_delivery(EventDelivery::Inline)
+        .min_reconnect_delay(Duration::from_secs(10))
+        .max_reconnect_delay(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx2 = tx.clone();
+    c.on_connecting(move |_, e| {
+        let _ = tx.send(format!("connecting {} {}", e.code, e.reason));
+    });
+    c.on_connected(move |_, _| {
+        let _ = tx2.send("connected".to_owned());
+    });
+    c.connect().unwrap();
+    assert_eq!(rx.recv().await.unwrap(), "connecting 0 connect called");
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+
+    dispatch("offline", None);
+    assert_eq!(rx.recv().await.unwrap(), "connecting 1 transport closed");
+    let t0 = js_sys::Date::now();
+    dispatch("online", None);
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+    assert!(
+        js_sys::Date::now() - t0 < 2000.0,
+        "online waited for the backoff"
+    );
+
+    // A normal unload (`persisted` false) changes nothing.
+    dispatch("pagehide", Some(false));
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(c.state(), centrifuge::State::Connected);
+    dispatch("pagehide", Some(true));
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        "connecting 1 page entered back/forward cache"
+    );
+    let t0 = js_sys::Date::now();
+    dispatch("pageshow", Some(true));
+    assert_eq!(rx.recv().await.unwrap(), "connected");
+    assert!(
+        js_sys::Date::now() - t0 < 2000.0,
+        "pageshow waited for the backoff"
+    );
+    c.close().await;
+}
+
+/// The browser defaults: `Inline` delivery (nothing set), and handlers that
+/// aren't `Send` (they capture an `Rc`), awaited from a `!Send` context.
+#[wasm_bindgen_test]
+async fn defaults_and_non_send_handlers() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let s = seen.clone();
+    let c = Client::builder_with_transports([endpoint(false)])
+        .on_connected(move |_, _| s.borrow_mut().push("connected"))
+        .build()
+        .expect("the default event delivery works in a browser");
+    let s = seen.clone();
+    c.on_disconnected(move |_, _| s.borrow_mut().push("disconnected"));
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let held = seen.clone(); // an `Rc` held across the await
+    c.close().await;
+    assert_eq!(*held.borrow(), ["connected", "disconnected"]);
+}
+
+/// Options a browser decides by itself fail `build()` when set.
+#[wasm_bindgen_test]
+fn browser_refuses_what_it_decides() {
+    let b = || Client::builder_with_transports([endpoint(false)]);
+    let err = |r: Result<Client, centrifuge::Error>| r.unwrap_err().to_string();
+    assert!(err(b().proxy(centrifuge::ProxyConfig::None).build()).contains("proxy()"));
+    assert!(err(b().tls(centrifuge::TlsConfig::new()).build()).contains("tls()"));
+    let mut h = http::HeaderMap::new();
+    h.insert("x-a", http::HeaderValue::from_static("1"));
+    assert!(err(b().http_headers(h).build()).contains("emulated_headers"));
+    assert!(err(b().event_delivery(EventDelivery::Thread).build()).contains("Inline"));
+    // The default proxy is fine; so is setting it back to `System`.
+    let c = b().build().unwrap();
+    assert!(c.set_proxy(centrifuge::ProxyConfig::System).is_ok());
+    assert!(c.set_proxy(centrifuge::ProxyConfig::None).is_err());
+}
+
+/// `Credentials::Include` over cross-origin HTTP-streaming: the server's
+/// CORS setup must allow credentials.
+#[wasm_bindgen_test]
+async fn http_stream_with_credentials() {
+    let c = Client::builder_with_transports([endpoint(true)])
+        .credentials(centrifuge::Credentials::Include)
+        .build()
+        .unwrap();
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(5)))
+        .await
+        .expect("connected");
+    c.publish(&format!("recovery:browser_c_{}", js_sys::Date::now()), "1")
+        .await
+        .expect("an emulation request with credentials");
+    c.close().await;
+}
+
+/// A WebSocket endpoint that fails (404) falls back to HTTP-streaming.
+#[wasm_bindgen_test]
+async fn falls_back_to_http_stream() {
+    let c = Client::builder_with_transports([
+        TransportEndpoint::websocket("ws://localhost:8010/connection/missing"),
+        endpoint(true),
+    ])
+    .min_reconnect_delay(Duration::from_millis(50))
+    .build()
+    .unwrap();
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(10)))
+        .await
+        .expect("connected");
+    assert_eq!(
+        c.statistics().transport,
+        Some(centrifuge::TransportKind::HttpStream)
+    );
+    c.close().await;
+}
+
+/// A server close with a terminal code (3500, invalid token, from the
+/// secure Centrifugo) reaches the app as the server sent it: disconnected,
+/// no reconnect.
+#[wasm_bindgen_test]
+async fn server_close_code_is_terminal() {
+    let c = Client::builder_with_transports([TransportEndpoint::websocket(
+        "ws://localhost:8012/connection/websocket",
+    )])
+    .token("not-a-jwt")
+    .build()
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.on_disconnected(move |_, e| {
+        let _ = tx.send((e.code, e.reason.clone()));
+    });
+    c.connect().unwrap();
+    let (code, reason) = rx.recv().await.unwrap();
+    assert_eq!((code, reason.as_str()), (3500, "invalid token"));
+    assert_eq!(c.state(), centrifuge::State::Disconnected);
+    c.close().await;
+}
+
+/// Nothing listening: the browser fires `error`, then `close` (1006). One
+/// transport error per attempt, and the client keeps reconnecting.
+#[wasm_bindgen_test]
+async fn refused_connection_reconnects() {
+    let c = Client::builder_with_transports([TransportEndpoint::websocket(
+        "ws://localhost:1/connection/websocket",
+    )])
+    .min_reconnect_delay(Duration::from_millis(100))
+    .max_reconnect_delay(Duration::from_millis(100))
+    .build()
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.on_error(move |_, e| {
+        let _ = tx.send(e.error.to_string());
+    });
+    c.connect().unwrap();
+    for _ in 0..2 {
+        let e = rx.recv().await.unwrap();
+        assert!(e.contains("1006") || e.contains("WebSocket"), "{e}");
+    }
+    assert_eq!(c.state(), centrifuge::State::Connecting);
+    c.close().await;
+}
+
+/// Fossil delta compression in a browser: big, similar publications arrive
+/// intact, and after the first only their deltas cross the wire.
+#[wasm_bindgen_test]
+async fn delta_compression() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .protocol(Protocol::Json)
+        .build()
+        .unwrap();
+    let channel = format!("delta:browser_{}", js_sys::Date::now());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sub = c
+        .new_subscription(&channel)
+        .delta(centrifuge::DeltaType::Fossil)
+        .on_publication(move |_, e| {
+            let _ = tx.send(String::from_utf8_lossy(&e.data).into_owned());
+        })
+        .build()
+        .unwrap();
+    sub.subscribe();
+    c.connect().unwrap();
+    sub.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let publisher = client(Protocol::Json, false);
+    publisher.connect().unwrap();
+    let big = "x".repeat(2000);
+    let mut after_first = 0;
+    for i in 0..5 {
+        let before = c.statistics().bytes_in;
+        let data = format!(r#"{{"i":{i},"payload":"{big}"}}"#);
+        publisher.publish(&channel, data.clone()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), data);
+        if i > 0 {
+            after_first += c.statistics().bytes_in - before;
+        }
+    }
+    assert!(
+        after_first < 4 * 1000,
+        "{after_first} bytes for 4 deltas of 2 KB payloads"
+    );
+    publisher.close().await;
+    c.close().await;
+}
+
+/// A browser API the configured transport needs is missing: `build()` says
+/// so, it doesn't panic.
+#[wasm_bindgen_test]
+fn missing_browser_api_is_a_configuration_error() {
+    let global = js_sys::global();
+    let ws = js_sys::Reflect::get(&global, &"WebSocket".into()).unwrap();
+    assert!(js_sys::Reflect::delete_property(&global, &"WebSocket".into()).unwrap());
+    let r = Client::builder_with_transports([endpoint(false)]).build();
+    js_sys::Reflect::set(&global, &"WebSocket".into(), &ws).unwrap();
+    let err = r.unwrap_err();
+    assert!(
+        matches!(err, centrifuge::Error::Configuration(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("no `WebSocket`"), "{err}");
+}
+
+/// Headers can't be set at runtime in a browser either.
+#[wasm_bindgen_test]
+fn set_http_headers_is_refused() {
+    let c = Client::builder_with_transports([endpoint(false)])
+        .build()
+        .unwrap();
+    let mut h = http::HeaderMap::new();
+    h.insert("x-a", http::HeaderValue::from_static("1"));
+    assert!(c.set_http_headers(h).is_err());
+    assert!(c.set_http_headers(http::HeaderMap::new()).is_ok());
+}
