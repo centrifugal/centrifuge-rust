@@ -21,8 +21,9 @@ Status: in progress. Steps 1–5 are done: the client builds for wasm32, without
 - **Centrifugal semantics unchanged**: close codes, reconnect rules and call
   failures go through the shared core.
 - **Order**: build baseline and audit, then `rt` and `platform` with native
-  unchanged, then WebSocket (with a real-browser test), HTTP-streaming, the
-  API, full tests, docs.
+  unchanged, then WebSocket (with a real-browser test), HTTP-streaming,
+  browser lifecycle events (network, back/forward cache), the API, full
+  tests, docs.
 - **Open until implemented**: binary size (estimated, measured in step 9),
   Safari (not claimed until tested).
 
@@ -678,6 +679,55 @@ step 9 widens the coverage.
   - custom HTTP headers can't be set on a browser WebSocket, which is why
     `http_headers` is rejected and `emulated_headers` exists (decision 6).
 
+### 7a. Browser lifecycle events (network, back/forward cache)
+
+Browsers tell a page about network changes and about entering the
+back/forward cache; centrifuge-js acts on both, and the browser build
+does the same. Spec §13's "no network-change API" is about native targets,
+where std and Tokio offer no such events; it doesn't apply here.
+
+Same behavior as centrifuge-js (`_setNetworkEvents`, `_setPageEvents`;
+the bfcache part from centrifuge-js#445):
+- `offline`, while connected or connecting: close the transport and go to
+  connecting with code 1 ("transport closed"), as on any transport loss.
+- `online`, while connecting: reconnect at once instead of waiting out the
+  backoff. If an attempt opened a transport while offline, abort it first
+  (mobile Safari may never fire its close event); its late events carry
+  the old `TransportId` and are dropped.
+- `pagehide` with `persisted` (the page enters the cache), while connected
+  or connecting: close the transport, connecting with code 1 and the reason
+  "page entered back/forward cache". A frozen page can't answer pings, and
+  its socket may stay open until the page is restored or evicted, so the
+  server would only drop it with `3012 no pong`.
+- `pageshow` with `persisted` (restored): reconnect at once. The usual
+  reconnect is still scheduled: its timer doesn't run in a frozen page, and
+  it reconnects a page restored without a `pageshow`.
+- `persisted` false (a normal load or unload): nothing.
+
+Where:
+- The listeners go on the global scope (`js_sys::global()`): a window gets
+  all four events; a Dedicated Worker gets `online` / `offline` only.
+  Attached on connect and removed once the client is disconnected or
+  closed, so a disconnected client holds no listener; the `Closure`s are
+  freed after `removeEventListener`, as for timers and sockets.
+- The core gets the two inputs the driver feeds from them: "the transport
+  is gone, connecting with code 1 and this reason" and "reconnect now"
+  (it already has a close in kind: `Input::Resumed` reconnects after a
+  long sleep). Native never sends them.
+- No option at first, and no JavaScript types in the API (decision 5), so
+  no `networkEventTarget` / `pageEventTarget`. If apps need to turn it off
+  (e.g. a `publish()` from the app's own `pagehide` handler, which the
+  closed connection no longer carries), a plain builder `bool`, added when
+  asked.
+
+Tests (in step 9's browser suite): `offline` / `online` dispatched to the
+global scope while connected, while connecting and while disconnected; a
+transport opened while offline is aborted on `online`; the back/forward
+cache in Chrome through Playwright (bfcache enabled; Playwright turns it
+off by default), as in centrifuge-js#445: the server sees the disconnect
+right after navigating away, and the client reconnects, with recovery, on
+going back.
+
 ### 8. Public API and configuration (non-breaking)
 
 The `cfg` gating needed to compile (`runtime()`, the builder's `runtime`
@@ -828,6 +878,7 @@ updated deliberately.
 5. Browser error conversion.
 6. Browser WebSocket transport, with the first real-browser smoke test.
 7. Browser HTTP-streaming transport.
+7a. Browser lifecycle events: `online` / `offline`, back/forward cache.
 8. Public API and configuration validation.
 9. Browser integration tests, Worker test and CI.
 10. Documentation and release.
