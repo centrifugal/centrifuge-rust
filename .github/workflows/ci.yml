@@ -300,6 +300,16 @@ jobs:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
           # The ping test stays connected for 40 s.
           WASM_BINDGEN_TEST_TIMEOUT: "90"
+      # Back/forward cache and worker.terminate(), driven from outside
+      # (tests/browser-e2e): Chrome only, the runner's own.
+      - name: Browser e2e
+        if: matrix.browser == 'chrome'
+        working-directory: tests/browser-e2e
+        run: |
+          cargo build --target wasm32-unknown-unknown --locked
+          wasm-bindgen --target web --out-dir www/pkg target/wasm32-unknown-unknown/debug/browser_e2e.wasm
+          npm ci --no-fund --no-audit
+          node run.mjs
       - if: failure() || cancelled()
         run: docker compose logs --tail 200
 
