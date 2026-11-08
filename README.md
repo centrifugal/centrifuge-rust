@@ -179,7 +179,7 @@ use tauri::{Emitter as _, Manager as _};
 
 [`examples/desktop_app.rs`](crates/centrifuge-client/examples/desktop_app.rs) shows the same patterns without a GUI dependency.
 
-### In the browser
+### In the browser (WASM)
 
 The same client works in the browser, compiled to WebAssembly: in a page or in a Web Worker, over WebSocket or HTTP-streaming. The API is the same, so the code you write for the desktop works there too:
 
@@ -220,7 +220,7 @@ Tested in Chrome and Firefox. Safari hasn't been tested yet, and Service Workers
 
 - **Protocol:** the Centrifugo client protocol v2 (Centrifugo v4 and newer). HTTP-streaming needs Centrifugo v5 or newer with `http_stream` enabled. Tested against Centrifugo v6.10.
 - **Runtime:** Tokio (multi-thread or current-thread).
-- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). Browsers (`wasm32-unknown-unknown`): Chrome and Firefox, tested in CI (see [In the browser](#in-the-browser)).
+- **Platforms:** Linux, macOS, Windows; iOS and Android build in CI but aren't tested there. Android needs one `centrifuge::android::init_with_env` call (the platform verifier's JNI setup) before `build()`, or a `rustls::ClientConfig` of your own, and takes no extra roots ([spec §3.4 and §5.2](docs/spec.md)). Browsers (`wasm32-unknown-unknown`): Chrome and Firefox, tested in CI (see [In the browser (WASM)](#in-the-browser-wasm)).
 - **MSRV:** Rust 1.85. Raising it is a minor-version change, noted in the [changelog](CHANGELOG.md).
 
 ## Differences from centrifuge-js
