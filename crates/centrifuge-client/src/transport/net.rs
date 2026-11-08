@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use url::Url;
 
+use super::uses_tls;
 use crate::config::{ProxyAuth, ProxyConfig, ProxyTarget, TlsConfig};
 use crate::shared::lock;
 
@@ -187,10 +188,6 @@ fn platform_verifier(
 }
 
 /// Whether connecting to `url` (an endpoint or an HTTP proxy) uses TLS.
-pub(crate) fn uses_tls(url: &Url) -> bool {
-    matches!(url.scheme(), "wss" | "https")
-}
-
 fn tls_error(e: &rustls::Error) -> crate::Error {
     crate::Error::Configuration(format!("TLS: {e}"))
 }

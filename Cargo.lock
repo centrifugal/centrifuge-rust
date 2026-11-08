@@ -195,6 +195,7 @@ dependencies = [
  "jni",
  "rcgen",
  "rustls",
+ "rustls-pki-types",
  "rustls-platform-verifier",
  "serde",
  "serde_json",

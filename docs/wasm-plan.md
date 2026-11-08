@@ -11,7 +11,8 @@ Status: proposal. Nothing here is implemented yet.
   and `fetch` behind the existing internal trait).
 - **No tokio runtime in the browser**: only `tokio::sync` and `select!`.
 - **Native API and behavior unchanged.** The wasm differences: `Inline`
-  event delivery by default, `close()` without `Send`, no `runtime()`.
+  event delivery by default, `close()` without `Send`, no `runtime()` and
+  no `TlsConfig::rustls_client_config` (feature `rustls-config`).
 - **Platform checks in one `platform` module**: what can never work fails
   at `build()`; what can become true later is checked per attempt and
   retried.
@@ -33,7 +34,8 @@ Run `centrifuge-client` on `wasm32-unknown-unknown` with both transports
 behavior** (spec §9.11). On wasm, the API may differ in defaults and trait
 bounds where the browser execution model requires it; each difference is
 listed and documented (the `EventDelivery` default, decision 8; the
-`close()` future without `Send`, step 8; native-only `runtime()`, decision 6).
+`close()` future without `Send`, step 8; native-only `runtime()`, decision 6,
+and `TlsConfig::rustls_client_config`, step 8).
 
 ## Verified starting point
 
@@ -224,6 +226,34 @@ suggest. Step 2 replaces this table with the full list.
 - Search for blocking tokio APIs (`spawn_blocking`, `block_in_place`,
   `blocking_lock` / `blocking_recv` / `blocking_send`) on the browser path.
   None exist today; keep it that way.
+
+**Result (done).**
+- Native-only: `hyper`, `hyper-util`, `http-body-util`, `rustls`,
+  `rustls-platform-verifier`, `tokio-rustls`, `tokio-tungstenite`, and
+  tokio's `rt`, `time`, `net` and `io-util`. Tokio on wasm resolves to
+  `sync` and `macros` only.
+- `rustls` can't be a wasm dependency: the `aws-lc-rs` (default) and `ring`
+  features enable `rustls/aws_lc_rs` / `rustls/ring` on every declaration of
+  `rustls`, which pulls `aws-lc-sys` into the wasm build, and Cargo rejects
+  the same crate under a second name. `TlsConfig` uses `rustls-pki-types`
+  directly instead, the crate `rustls` re-exports its certificate types
+  from. So `TlsConfig` is the same type on both targets, with no `cfg`
+  variant. `rustls_client_config` is native-only (step 8).
+- `transport::net` (the native connector) is replaced on wasm by a stand-in
+  holding the settings the shared code reads (`proxy`); `ws` and
+  `http_stream` are native-only. `uses_tls` moved to `transport`.
+- `getrandom`: no version is in the wasm graph. No native-only crate
+  either.
+- Remaining errors (82), all in shared code, none from dependencies:
+  - `tokio::time`, `tokio::spawn`, `tokio::task::{JoinHandle, AbortHandle}`,
+    `tokio::runtime::Handle`, `task_local!`: the `rt` module (step 3);
+  - handler and callback storage requires `Send` (41 + 2 errors): the
+    `dyn` types in `dispatch.rs` (`H<T, E>`) and `driver.rs` (token and
+    state getters and their futures) say `+ Send`, though the public bounds
+    are `MaybeSend`. A trait object can't name `MaybeSend` (only auto
+    traits can be added), so these aliases get a definition per target
+    (step 2 lists them);
+  - two type-inference errors that follow from the missing `tokio::time`.
 
 ### 2. Runtime audit
 Replace the sample table above with the full list of call sites. Cover:
@@ -620,13 +650,11 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
 - `EventDelivery`: `Inline` by default on wasm, and an explicit `Thread`
   rejected with a wasm-specific message (decision 8). Document the
   target-dependent default on `EventDelivery` and on
-  `ClientBuilder::event_delivery`. `TlsConfig` stores `rustls` types internally. On wasm, prefer an
-  empty `cfg` variant: the type and its constructors keep their signatures,
-  but store only "TLS was configured", since `build()` rejects it anyway.
-  Keep `rustls-pki-types` only if a constructor's signature needs one of its
-  types.
-  `TlsConfig::rustls_client_config` (feature `rustls-config`) is native-only:
-  it takes a `rustls::ClientConfig`.
+  `ClientBuilder::event_delivery`.
+- `TlsConfig` is the same type on wasm, through `rustls-pki-types` (step 1);
+  `build()` rejects it there anyway. `TlsConfig::rustls_client_config`
+  (feature `rustls-config`) is native-only: it takes a
+  `rustls::ClientConfig`.
 - `close()`: two `cfg`-gated signatures. Native stays exactly
   `impl Future<Output = ()> + Send + 'static`; wasm drops `Send`. Do not
   switch to a boxed named future: that would change the API and add an
@@ -756,8 +784,6 @@ updated deliberately.
   `Send` assumptions; step 2 exists to find them before refactoring.
 - `rt` touches all runtime code, so native regressions are possible; step 4
   runs the full native suite before any browser work.
-- Keeping `TlsConfig` available on wasm may pull in more of `rustls` than
-  wanted; step 1 decides.
 - Streaming `fetch` and close-code handling differ slightly across browsers.
 
 ## Future optimization

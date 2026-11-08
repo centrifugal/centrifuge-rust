@@ -248,13 +248,19 @@ impl std::fmt::Debug for ProxyConfig {
     }
 }
 
+// rustls re-exports these; wasm has no rustls (docs/wasm-plan.md, step 1).
+#[cfg(not(target_arch = "wasm32"))]
+use rustls::pki_types;
+#[cfg(target_arch = "wasm32")]
+use rustls_pki_types as pki_types;
+
 /// TLS configuration (docs/spec.md §5.2). The default verifies with the OS
 /// trust store and its settings (`rustls-platform-verifier`).
 #[derive(Clone, Default)]
 pub struct TlsConfig {
-    pub(crate) extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    pub(crate) extra_roots: Vec<pki_types::CertificateDer<'static>>,
     pub(crate) accept_invalid: bool,
-    #[cfg(feature = "rustls-config")]
+    #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
     pub(crate) custom: Option<Arc<rustls::ClientConfig>>,
 }
 
@@ -286,9 +292,9 @@ impl TlsConfig {
     ///
     /// [`Error::Configuration`] if the PEM holds no certificate or can't be parsed.
     pub fn add_root_pem(mut self, pem: &[u8]) -> Result<Self, Error> {
-        use rustls::pki_types::pem::PemObject as _;
+        use pki_types::pem::PemObject as _;
         let before = self.extra_roots.len();
-        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+        for cert in pki_types::CertificateDer::pem_slice_iter(pem) {
             self.extra_roots.push(
                 cert.map_err(|e| Error::Configuration(format!("invalid PEM certificate: {e}")))?,
             );
@@ -314,7 +320,7 @@ impl TlsConfig {
     /// `danger_accept_invalid_certs`.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn uses_platform_verifier(&self) -> bool {
-        #[cfg(feature = "rustls-config")]
+        #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
         if self.custom.is_some() {
             return false;
         }
@@ -327,7 +333,7 @@ impl TlsConfig {
     /// It replaces the OS verifier: roots from [`add_root_pem`](Self::add_root_pem)
     /// are ignored, and on Android no `centrifuge::android::init_*` call is
     /// needed.
-    #[cfg(feature = "rustls-config")]
+    #[cfg(all(feature = "rustls-config", not(target_arch = "wasm32")))]
     #[must_use]
     pub fn rustls_client_config(cfg: rustls::ClientConfig) -> Self {
         Self {

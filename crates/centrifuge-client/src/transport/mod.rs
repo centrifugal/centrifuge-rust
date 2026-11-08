@@ -2,9 +2,15 @@
 //! bidirectional emulation. Each transport has a reader (in its open task) and
 //! a writer task; the driver only sees [`Inbound`] messages.
 
-#[cfg(feature = "http-stream")]
+#[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
 mod http_stream;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod net;
+// The browser connects by itself: only the settings the shared code reads.
+#[cfg(target_arch = "wasm32")]
+#[path = "net_wasm.rs"]
+pub(crate) mod net;
+#[cfg(not(target_arch = "wasm32"))]
 mod ws;
 
 use std::sync::Arc;
@@ -140,6 +146,11 @@ impl LastReceived {
     }
 }
 
+/// Whether `url` is connected with TLS.
+pub(crate) fn uses_tls(url: &Url) -> bool {
+    matches!(url.scheme(), "wss" | "https")
+}
+
 /// Everything a transport needs; cheap to clone per attempt.
 #[derive(Clone)]
 pub(crate) struct Ctx {
@@ -222,8 +233,9 @@ impl std::fmt::Debug for Ctx {
 /// aborts the open or the read (patterns 34, 51).
 pub(crate) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
     match ctx.kind {
+        #[cfg(not(target_arch = "wasm32"))]
         TransportKind::WebSocket => ws::run(ctx).await,
-        #[cfg(feature = "http-stream")]
+        #[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
         TransportKind::HttpStream => http_stream::run(ctx, initial).await,
         #[allow(unreachable_patterns)]
         _ => {

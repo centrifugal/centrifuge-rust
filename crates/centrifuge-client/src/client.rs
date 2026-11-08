@@ -34,7 +34,8 @@ use crate::shared::{CallConfig, Command, Shared, lock};
 use crate::stats::Statistics;
 use crate::stream::EventStream;
 use crate::subscription::{Subscription, SubscriptionBuilder};
-use crate::transport::net::{Net, uses_tls};
+use crate::transport::net::Net;
+use crate::transport::uses_tls;
 
 /// Passed to the connection token getter. Empty for now; it may carry more
 /// context later.
