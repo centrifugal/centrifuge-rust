@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>centrifuge-rust browser e2e</title>
+<script type="module">
+  import init, { start } from './pkg/browser_e2e.js';
+  const ws = 'ws://localhost:8010/connection/websocket';
+  window.restored = false;
+  addEventListener('pageshow', (e) => { if (e.persisted) window.restored = true; });
+  await init();
+  // The page's own client (back/forward cache test).
+  window.startPage = (channel) => start(ws, channel);
+  // A client in a Dedicated Worker (terminate test).
+  window.startWorker = (channel) => new Promise((resolve, reject) => {
+    const w = new Worker('./worker.js', { type: 'module' });
+    w.onmessage = (e) => (e.data === 'started' ? resolve() : reject(new Error(e.data)));
+    w.postMessage({ ws, channel });
+    window.worker = w;
+  });
+  window.ready = true;
+</script>

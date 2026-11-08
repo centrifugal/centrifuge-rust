@@ -1,0 +1,16 @@
+# A tiny browser app for tests/browser-e2e/run.mjs (back/forward cache,
+# worker.terminate()): its own workspace, so the main build never sees it.
+[package]
+name = "browser-e2e"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+centrifuge-client = { path = "../../crates/centrifuge-client", default-features = false, features = ["json"] }
+wasm-bindgen = "0.2.100"
+
+[workspace]
