@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–4 are done: the client builds for wasm32, without browser transports yet.
+Status: in progress. Steps 1–5 are done: the client builds for wasm32, without browser transports yet.
 
 ## Summary
 
@@ -515,6 +515,13 @@ Limits, to document rather than work around:
   developer tools show the detailed reason.
 - WebSocket `error` events carry no reason; the close code and reason (if
   any) are all the SDK can report.
+
+**Result (done).** `transport/browser_error.rs`: `BrowserError` (owned
+`name` / `message`, each at most 300 bytes) read from a `JsValue` at the
+boundary, and `failed(Failure, Option<BrowserError>) -> CloseReason` for each
+case above (an unsupported environment included); the browser error becomes
+the `Send + Sync` source. Everything but reading the `JsValue` builds on every
+target, so host tests cover the mapping.
 
 ### 6. Browser WebSocket transport (`web-sys::WebSocket`)
 
