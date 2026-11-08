@@ -924,7 +924,22 @@ LTO, `panic = "abort"`, stripped, no `wasm-opt`):
 
 Keeping tokio `sync` costs about 5 KB gzipped over a futures-only design, so it
 is not a reason for a separate driver. Full client estimate (not measured):
-300-500 KB raw, 100-180 KB gzipped before `wasm-opt`. Measure the real build
+300-500 KB raw, 100-180 KB gzipped before `wasm-opt`.
+
+**Measured (step 9).** A scratch app that builds a client, subscribes,
+connects and publishes; release, `opt-level = "z"`, LTO, one codegen unit,
+`panic = "abort"`, `wasm-bindgen --target web`, no `wasm-opt`:
+
+| Build | Raw | Gzip | Brotli |
+|---|---|---|---|
+| Protobuf + WebSocket only (no default features) | 732 KB | 222 KB | 181 KB |
+| the same, name section removed | 501 KB | 192 KB | — |
+| `json`, `http-stream`, `delta`, `serde`; name section removed | 655 KB | 250 KB | 207 KB |
+
+Above the estimate: about 190–250 KB gzipped before `wasm-opt`. Next: run
+`wasm-opt -Oz` and look at what dominates (`twiggy`; `url`'s IDNA tables,
+`tracing`, `prost` and formatting are the likely candidates), then set the
+soft CI budget from the result. Measure the real build
 in step 9, then set a soft CI budget from it (for example, warn when the
 gzipped size after `wasm-opt -Oz` grows more than 10% over the recorded
 baseline). It should be a warning, not a failure, and the baseline is
