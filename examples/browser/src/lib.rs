@@ -2,6 +2,8 @@
 //! draws it, Rust does the connection. Run with
 //! `docker compose -f examples/browser/compose.yml up`, then open
 //! <http://localhost:8080> in two tabs.
+// Browser only: natively (the workspace builds every member) it's empty.
+#![cfg(target_arch = "wasm32")]
 
 use centrifuge::{Client, Subscription};
 use wasm_bindgen::prelude::*;
