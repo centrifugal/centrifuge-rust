@@ -56,8 +56,7 @@ pub(crate) struct Net {
     pub(crate) proxy: Mutex<ProxyConfig>,
     tls: Arc<rustls::ClientConfig>,
     /// `tls` checks certificates with rustls-platform-verifier, which needs
-    /// `centrifuge::android::init_*` first.
-    #[cfg(target_os = "android")]
+    /// `centrifuge::android::init_*` first (`platform::check_attempt`).
     platform_verifier: bool,
     accept_invalid: bool,
     /// At most one DNS lookup in flight per client: a dropped future doesn't
@@ -175,9 +174,10 @@ fn platform_verifier(
     tls: &TlsConfig,
     provider: Arc<rustls::crypto::CryptoProvider>,
 ) -> Result<rustls_platform_verifier::Verifier, crate::Error> {
+    // No extra roots there: `platform::check_build` refuses them first.
     #[cfg(target_os = "android")]
     {
-        android_rules::extra_roots(tls.extra_roots.len())?;
+        let _ = tls;
         rustls_platform_verifier::Verifier::new(provider).map_err(|e| tls_error(&e))
     }
     #[cfg(not(target_os = "android"))]
@@ -192,41 +192,6 @@ fn tls_error(e: &rustls::Error) -> crate::Error {
     crate::Error::Configuration(format!("TLS: {e}"))
 }
 
-/// Android's TLS rules (docs/spec.md §5.2). Plain functions, built on every
-/// target, so host tests cover them; only Android calls them.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-mod android_rules {
-    /// Android's verifier takes no extra roots: refuse them at `build()`.
-    pub(super) fn extra_roots(count: usize) -> Result<(), crate::Error> {
-        if count == 0 {
-            return Ok(());
-        }
-        Err(crate::Error::Configuration(
-            "TLS: extra roots aren't supported on Android; install the CA in the OS store, \
-             or pass your own rustls::ClientConfig with TlsConfig::rustls_client_config \
-             (feature `rustls-config`)"
-                .into(),
-        ))
-    }
-
-    pub(super) const NOT_INITIALIZED: &str = "TLS on Android needs setup first: call \
-        centrifuge::android::init_with_env (or init_with_refs, init_with_runtime) before \
-        build(), also if the app already set up rustls-platform-verifier another way \
-        (the call is then a no-op)";
-
-    /// Without `centrifuge::android::init_*`, the verifier panics on its first
-    /// certificate check. Fail the connection attempt with a clear error instead.
-    pub(super) fn verifier_ready(
-        uses_platform_verifier: bool,
-        initialized: bool,
-    ) -> Result<(), String> {
-        if !uses_platform_verifier || initialized {
-            return Ok(());
-        }
-        Err(NOT_INITIALIZED.into())
-    }
-}
-
 impl Net {
     pub(crate) fn new(
         proxy: ProxyConfig,
@@ -237,19 +202,11 @@ impl Net {
         Ok(Self {
             proxy: Mutex::new(proxy),
             tls: cfg,
-            #[cfg(target_os = "android")]
             platform_verifier: tls.uses_platform_verifier(),
             accept_invalid: tls.accept_invalid,
             lookup: Mutex::new(None),
             handshake_timeout,
         })
-    }
-
-    /// Whether TLS can be used now: on Android the platform verifier needs
-    /// `centrifuge::android::init_*` first.
-    #[cfg(target_os = "android")]
-    pub(crate) fn android_tls_ready(&self) -> Result<(), String> {
-        android_rules::verifier_ready(self.platform_verifier, crate::android::initialized())
     }
 
     fn tls_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, crate::Error> {
@@ -437,13 +394,9 @@ impl Net {
             .port_or_known_default()
             .unwrap_or(if secure { 443 } else { 80 });
         let route = self.route_for(url);
-        // build() refuses TLS endpoints before the setup; this also covers an
-        // HTTPS proxy from the environment, the OS or `set_proxy`. Checked
-        // before any DNS or TCP, so a retry costs no network.
-        #[cfg(target_os = "android")]
-        if secure || matches!(&route, Route::Http { url: p, .. } if uses_tls(p)) {
-            self.android_tls_ready().map_err(NetError::new)?;
-        }
+        // Before any DNS or TCP, so a retry costs no network.
+        let tls = secure || matches!(&route, Route::Http { url: p, .. } if uses_tls(p));
+        crate::platform::check_attempt(tls, self.platform_verifier).map_err(NetError::new)?;
         let io: BoxIo = match route {
             Route::Direct => Box::pin(self.tcp(&host, port).await?),
             Route::Http { url: purl, auth } => {
@@ -684,37 +637,6 @@ async fn socks5_connect(
 
 #[cfg(test)]
 mod tests {
-    use super::android_rules;
-
-    #[test]
-    fn android_refuses_extra_roots() {
-        assert!(android_rules::extra_roots(0).is_ok());
-        let err = android_rules::extra_roots(1).unwrap_err().to_string();
-        assert!(
-            err.contains("extra roots aren't supported on Android"),
-            "{err}"
-        );
-        assert!(err.contains("feature `rustls-config`"), "{err}");
-    }
-
-    #[test]
-    fn android_needs_init_only_for_the_platform_verifier() {
-        assert!(android_rules::verifier_ready(true, true).is_ok());
-        assert!(android_rules::verifier_ready(false, false).is_ok());
-        let err = android_rules::verifier_ready(true, false).unwrap_err();
-        assert!(err.contains("centrifuge::android::init_with_env"), "{err}");
-    }
-
-    #[test]
-    fn platform_verifier_flag() {
-        assert!(crate::TlsConfig::new().uses_platform_verifier());
-        assert!(
-            !crate::TlsConfig::new()
-                .danger_accept_invalid_certs()
-                .uses_platform_verifier()
-        );
-    }
-
     #[test]
     fn base64_matches_rfc4648() {
         for (i, o) in [

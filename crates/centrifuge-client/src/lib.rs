@@ -64,6 +64,7 @@ mod driver;
 mod error;
 mod events;
 mod maybe_send;
+mod platform;
 mod shared;
 mod stats;
 mod stream;
