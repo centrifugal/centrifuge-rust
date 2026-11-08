@@ -4,6 +4,8 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+## [0.1.1]
+
 ### Added
 
 - Browsers (`wasm32-unknown-unknown`): the client runs in a page or a Dedicated Worker over the browser's `WebSocket` and `fetch` (HTTP-streaming), with the same API (handlers needn't be `Send` there). `EventDelivery::Inline` is the default on wasm32; an explicit `proxy()`, `tls()`, `http_headers()` or `EventDelivery::Thread`, or a missing browser API, fails `build()`. As in centrifuge-js, `online` / `offline` and the back/forward cache are acted on. New `ClientBuilder::credentials` (`Credentials`) sets `fetch`'s credentials mode; no effect on other targets. Tested in Chrome and Firefox in CI. See the README.
@@ -17,6 +19,7 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 - `ready()` and `sub.ready()` awaited right after `connect()` or `subscribe()`, and calls made from event handlers, could deadlock the calling thread: they read a state snapshot twice under one held borrow, and a snapshot update arriving between the two reads blocked both sides. Rare (about one in a few hundred test runs), and no timeout could end it, since the thread was blocked rather than waiting.
 - `build()` fails with `Error::Configuration` when the `EventDelivery::Thread` event thread can't be started. Before, the client ran but silently delivered no events at all. If the event thread stops later (an SDK bug), the client now stops loudly as on a handler panic, with an `error` event and `disconnected`, and the events it didn't deliver aren't committed, so recovery delivers them again. Before, it kept running, dropped every event and advanced positions past them. Later events are delivered on the client's task (docs/spec.md §9.4).
+- HTTP-streaming: closing a session now stops an emulation request already in flight. Before, `send()` and other calls could wait until that request ended or hit its timeout after `disconnect()`, and the request kept its connection open. Now they fail with `ClientDisconnected` right away.
 - `centrifuge-client` builds for Android. The platform verifier there takes no extra roots, so a `TlsConfig` with PEM CAs fails `build()` with `Error::Configuration` on Android instead of dropping them (docs/spec.md §5.2). Android and iOS are now built in CI.
 
 ## [0.1.0]
