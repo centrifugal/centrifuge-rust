@@ -168,11 +168,14 @@ pub(crate) struct Ctx {
     pub(crate) url: Url,
     pub(crate) protocol: Protocol,
     pub(crate) max_message_size: usize,
+    // A page can't set them, and the browser connects: never read on wasm32.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) http_headers: http::HeaderMap,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) emulation_endpoint: Option<Url>,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) timeout: std::time::Duration,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) net: Arc<net::Net>,
     pub(crate) shared: Arc<Shared>,
     pub(crate) inbound: mpsc::Sender<Inbound>,
@@ -180,6 +183,9 @@ pub(crate) struct Ctx {
     pub(crate) last_received: Arc<LastReceived>,
     /// Set by the driver to close this transport's writer gracefully.
     pub(crate) closing: watch::Receiver<bool>,
+    /// The browser `fetch` credentials mode.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) credentials: crate::config::Credentials,
 }
 
 impl Ctx {

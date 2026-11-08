@@ -13,16 +13,25 @@
 use centrifuge_client_core::machine::TransportKind;
 use url::Url;
 
-use crate::config::{ProxyConfig, TlsConfig};
+use crate::config::{EventDelivery, ProxyConfig, TlsConfig};
 use crate::error::Error;
 use crate::transport::uses_tls;
 
-/// What `build()` knows about the connections.
+/// What `build()` knows about the connections, and which options the app
+/// set explicitly (a default is best effort, an explicit setting a promise).
+// Independent facts about the configuration.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BuildCheck<'a> {
     pub(crate) endpoints: &'a [(TransportKind, Url)],
     pub(crate) emulation: Option<&'a Url>,
     pub(crate) proxy: &'a ProxyConfig,
     pub(crate) tls: &'a TlsConfig,
+    pub(crate) proxy_set: bool,
+    pub(crate) tls_set: bool,
+    /// Non-empty `http_headers`.
+    pub(crate) http_headers: bool,
+    pub(crate) credentials: bool,
+    pub(crate) event_delivery: EventDelivery,
 }
 
 /// # Errors
@@ -31,13 +40,45 @@ pub(crate) struct BuildCheck<'a> {
 // Infallible on most platforms, not on all.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn check_build(c: &BuildCheck<'_>) -> Result<(), Error> {
-    #[cfg(target_os = "android")]
+    #[cfg(target_arch = "wasm32")]
     {
-        android::check_build(c, crate::android::initialized())
+        browser::check_build(c, |api| {
+            js_sys::Reflect::has(&js_sys::global(), &api.into()).unwrap_or(false)
+        })
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = c;
+        native_check_build(c)?;
+        #[cfg(target_os = "android")]
+        android::check_build(c, crate::android::initialized())?;
+        Ok(())
+    }
+}
+
+/// Options that only a browser serves.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn native_check_build(c: &BuildCheck<'_>) -> Result<(), Error> {
+    if c.credentials {
+        return Err(Error::Configuration(
+            "credentials() is for browsers (wasm32): fetch's credentials mode; \
+             remove it on this target"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `Client::set_proxy`: in a browser only `ProxyConfig::System`, which
+/// means "the browser decides".
+///
+/// # Errors
+///
+/// [`Error::Configuration`] for any other proxy in a browser.
+#[allow(clippy::unnecessary_wraps)] // infallible natively
+pub(crate) fn check_proxy(proxy: &ProxyConfig) -> Result<(), Error> {
+    if cfg!(target_arch = "wasm32") {
+        browser::check_proxy(proxy)
+    } else {
         Ok(())
     }
 }
@@ -76,6 +117,74 @@ fn configured_tls(c: &BuildCheck<'_>) -> bool {
     c.endpoints.iter().any(|(_, u)| uses_tls(u))
         || (streaming && c.emulation.is_some_and(uses_tls))
         || matches!(c.proxy, ProxyConfig::Http { url, .. } if uses_tls(url))
+}
+
+/// The browser's rules (docs/wasm-plan.md, decision 6 and step 8): options
+/// that a browser decides by itself are refused when set, and the global APIs
+/// the configured transports use must exist.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod browser {
+    use centrifuge_client_core::machine::TransportKind;
+
+    use super::BuildCheck;
+    use crate::config::{EventDelivery, ProxyConfig};
+    use crate::error::Error;
+
+    fn refuse(what: &str) -> Result<(), Error> {
+        Err(Error::Configuration(format!("in a browser, {what}")))
+    }
+
+    /// `has(api)`: the global scope has `api`.
+    pub(super) fn check_build(c: &BuildCheck<'_>, has: impl Fn(&str) -> bool) -> Result<(), Error> {
+        if c.proxy_set {
+            return refuse("the browser decides the proxy: remove proxy()");
+        }
+        if c.tls_set {
+            return refuse("the browser verifies certificates: remove tls()");
+        }
+        if c.http_headers {
+            return refuse(
+                "a page can't set HTTP headers on a WebSocket: use emulated_headers() \
+                 instead of http_headers()",
+            );
+        }
+        if c.event_delivery == EventDelivery::Thread {
+            return refuse(
+                "EventDelivery::Thread needs threads, which wasm32 doesn't have: \
+                 use EventDelivery::Inline (the default there)",
+            );
+        }
+        // Timers run from the first attempt; each transport needs its API.
+        let mut apis = vec!["setTimeout", "clearTimeout"];
+        if c.endpoints
+            .iter()
+            .any(|(k, _)| *k == TransportKind::WebSocket)
+        {
+            apis.push("WebSocket");
+        }
+        if c.endpoints
+            .iter()
+            .any(|(k, _)| *k == TransportKind::HttpStream)
+        {
+            apis.extend(["fetch", "AbortController"]);
+        }
+        for api in apis {
+            if !has(api) {
+                return Err(Error::Configuration(format!(
+                    "unsupported environment: no `{api}` in the global scope"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_proxy(proxy: &ProxyConfig) -> Result<(), Error> {
+        if matches!(proxy, ProxyConfig::System) {
+            Ok(())
+        } else {
+            refuse("the browser decides the proxy: only ProxyConfig::System")
+        }
+    }
 }
 
 /// Android's TLS rules (docs/spec.md §5.2).
@@ -146,7 +255,10 @@ mod android {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildCheck, ProxyConfig, TlsConfig, TransportKind, Url, android, configured_tls};
+    use super::{
+        BuildCheck, EventDelivery, ProxyConfig, TlsConfig, TransportKind, Url, android, browser,
+        configured_tls, native_check_build,
+    };
 
     fn check<'a>(
         endpoints: &'a [(TransportKind, Url)],
@@ -159,6 +271,11 @@ mod tests {
             emulation,
             proxy,
             tls,
+            proxy_set: false,
+            tls_set: false,
+            http_headers: false,
+            credentials: false,
+            event_delivery: EventDelivery::Inline,
         }
     }
 
@@ -274,5 +391,88 @@ mod tests {
                 .danger_accept_invalid_certs()
                 .uses_platform_verifier()
         );
+    }
+
+    #[test]
+    fn browser_refuses_what_it_decides_itself() {
+        let ws = [ep(TransportKind::WebSocket, "wss://h/c")];
+        let (none, t) = (ProxyConfig::System, TlsConfig::new());
+        let all = |_: &str| true;
+        let base = || check(&ws, None, &none, &t);
+        assert!(browser::check_build(&base(), all).is_ok());
+        for (c, what) in [
+            (
+                BuildCheck {
+                    proxy_set: true,
+                    ..base()
+                },
+                "remove proxy()",
+            ),
+            (
+                BuildCheck {
+                    tls_set: true,
+                    ..base()
+                },
+                "remove tls()",
+            ),
+            (
+                BuildCheck {
+                    http_headers: true,
+                    ..base()
+                },
+                "emulated_headers()",
+            ),
+            (
+                BuildCheck {
+                    event_delivery: EventDelivery::Thread,
+                    ..base()
+                },
+                "EventDelivery::Inline",
+            ),
+        ] {
+            let err = browser::check_build(&c, all).unwrap_err().to_string();
+            assert!(err.contains(what), "{err}");
+        }
+        assert!(browser::check_proxy(&ProxyConfig::System).is_ok());
+        assert!(browser::check_proxy(&ProxyConfig::None).is_err());
+    }
+
+    #[test]
+    fn browser_needs_the_apis_of_the_configured_transports() {
+        let ws = [ep(TransportKind::WebSocket, "ws://h/c")];
+        let both = [
+            ep(TransportKind::WebSocket, "ws://h/c"),
+            ep(TransportKind::HttpStream, "http://h/s"),
+        ];
+        let (p, t) = (ProxyConfig::System, TlsConfig::new());
+        let without = |missing: &'static str| move |api: &str| api != missing;
+        // fetch is only needed with HTTP-streaming, fallbacks included.
+        assert!(browser::check_build(&check(&ws, None, &p, &t), without("fetch")).is_ok());
+        for missing in [
+            "fetch",
+            "AbortController",
+            "WebSocket",
+            "setTimeout",
+            "clearTimeout",
+        ] {
+            let err = browser::check_build(&check(&both, None, &p, &t), without(missing))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("no `{missing}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn credentials_are_browser_only() {
+        let ws = [ep(TransportKind::WebSocket, "ws://h/c")];
+        let (p, t) = (ProxyConfig::System, TlsConfig::new());
+        assert!(native_check_build(&check(&ws, None, &p, &t)).is_ok());
+        let err = native_check_build(&BuildCheck {
+            credentials: true,
+            ..check(&ws, None, &p, &t)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("for browsers"), "{err}");
     }
 }

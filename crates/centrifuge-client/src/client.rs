@@ -18,8 +18,8 @@ use url::Url;
 
 use crate::calls;
 use crate::config::{
-    EventDelivery, ProxyConfig, TlsConfig, TransportEndpoint, check_http_headers, defaults,
-    duration,
+    Credentials, EventDelivery, ProxyConfig, TlsConfig, TransportEndpoint, check_http_headers,
+    defaults, duration,
 };
 use crate::dispatch::{ClientHandlers, Delivery, Dispatcher, in_handler};
 use crate::driver::{ConnTokenGetter, Driver, DriverConfig, TokenFuture};
@@ -270,8 +270,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Never for now; the `Result` leaves room for validation.
+    /// [`Error::Configuration`] in a browser for any proxy but
+    /// [`ProxyConfig::System`]: the browser decides there.
     pub fn set_proxy(&self, proxy: ProxyConfig) -> Result<(), Error> {
+        crate::platform::check_proxy(&proxy)?;
         *lock(&self.inner.shared.net.proxy) = proxy;
         Ok(())
     }
@@ -645,6 +647,11 @@ pub struct ClientBuilder {
     max_message_size: usize,
     tls: TlsConfig,
     proxy: ProxyConfig,
+    /// `tls()` / `proxy()` were called: an explicit setting that a platform
+    /// can't serve fails `build()`, while the default is best effort.
+    tls_set: bool,
+    proxy_set: bool,
+    credentials: Option<Credentials>,
     event_delivery: EventDelivery,
     handlers: ClientHandlers,
 }
@@ -685,6 +692,9 @@ impl ClientBuilder {
             max_message_size: defaults::MAX_MESSAGE_SIZE,
             tls: TlsConfig::default(),
             proxy: ProxyConfig::default(),
+            tls_set: false,
+            proxy_set: false,
+            credentials: None,
             event_delivery: EventDelivery::default(),
             handlers: ClientHandlers::default(),
         }
@@ -755,7 +765,9 @@ impl ClientBuilder {
     }
 
     /// Real HTTP headers: on the WebSocket upgrade, the HTTP-stream request
-    /// and every emulation request.
+    /// and every emulation request. Not in a browser, which doesn't let a
+    /// page set them on a WebSocket: `build()` fails there; use
+    /// [`emulated_headers`](Self::emulated_headers).
     pub fn http_headers(mut self, headers: http::HeaderMap) -> Self {
         self.http_headers = headers;
         self
@@ -812,19 +824,33 @@ impl ClientBuilder {
         self
     }
 
-    /// TLS configuration. Default: the OS trust store.
+    /// TLS configuration. Default: the OS trust store. Not in a browser, which
+    /// verifies by itself: setting it fails `build()` there.
     pub fn tls(mut self, tls: TlsConfig) -> Self {
         self.tls = tls;
+        self.tls_set = true;
         self
     }
 
-    /// Proxy configuration. Default: [`ProxyConfig::System`].
+    /// Proxy configuration. Default: [`ProxyConfig::System`], which in a
+    /// browser means "the browser decides". Setting it in a browser fails
+    /// `build()`.
     pub fn proxy(mut self, proxy: ProxyConfig) -> Self {
         self.proxy = proxy;
+        self.proxy_set = true;
         self
     }
 
-    /// Where event handlers run. Default: [`EventDelivery::Thread`].
+    /// The browser `fetch` credentials mode for HTTP-streaming. Default:
+    /// [`Credentials::SameOrigin`]. Browser only: setting it on another target
+    /// fails `build()`.
+    pub fn credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// Where event handlers run. Default: [`EventDelivery::Thread`] natively,
+    /// [`EventDelivery::Inline`] on `wasm32`.
     pub fn event_delivery(mut self, mode: EventDelivery) -> Self {
         self.event_delivery = mode;
         self
@@ -936,6 +962,11 @@ impl ClientBuilder {
             emulation: emulation_endpoint.as_ref(),
             proxy: &self.proxy,
             tls: &self.tls,
+            proxy_set: self.proxy_set,
+            tls_set: self.tls_set,
+            http_headers: !self.http_headers.is_empty(),
+            credentials: self.credentials.is_some(),
+            event_delivery: self.event_delivery,
         })?;
         let net = Arc::new(Net::new(self.proxy, &self.tls, self.handshake_timeout)?);
 
@@ -987,6 +1018,8 @@ impl ClientBuilder {
                 emulation_endpoint,
                 max_message_size: self.max_message_size,
                 get_token: self.get_token,
+                #[cfg(target_arch = "wasm32")]
+                credentials: self.credentials.unwrap_or_default(),
             },
             dispatcher,
             rx,
@@ -1009,4 +1042,25 @@ fn _assert_traits() {
     send_sync::<ConnectedEvent>();
     send_sync::<ErrorEvent>();
     send_sync::<DisconnectedEvent>();
+}
+
+/// The futures the SDK returns are `Send` natively, so they can be spawned
+/// on a multi-threaded runtime (only checked here, never run).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn _assert_send_futures(c: &Client, s: &crate::Subscription) {
+    fn send<T: Send>(_: &T) {}
+    send(&c.close());
+    send(&c.ready(None));
+    send(&c.rpc("m", ""));
+    send(&c.send(""));
+    send(&c.publish("ch", ""));
+    send(&c.history("ch", crate::HistoryOptions::new()));
+    send(&c.presence("ch"));
+    send(&c.presence_stats("ch"));
+    send(&s.ready(None));
+    send(&s.publish(""));
+    send(&s.history(crate::HistoryOptions::new()));
+    send(&s.presence());
+    send(&s.presence_stats());
 }

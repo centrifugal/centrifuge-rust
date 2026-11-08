@@ -62,6 +62,9 @@ pub(crate) struct DriverConfig {
     pub(crate) emulation_endpoint: Option<Url>,
     pub(crate) max_message_size: usize,
     pub(crate) get_token: Option<ConnTokenGetter>,
+    /// The browser `fetch` credentials mode.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) credentials: crate::config::Credentials,
 }
 
 struct TransportHandle {
@@ -490,6 +493,8 @@ impl Driver {
             budget: self.budget.clone(),
             last_received: self.last_received.clone(),
             closing: closing_rx,
+            #[cfg(target_arch = "wasm32")]
+            credentials: self.cfg.credentials,
         };
         let task = rt::spawn(transport::run(ctx, req.initial));
         self.transports.insert(

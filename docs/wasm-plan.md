@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–7a are done: the client works in a browser over WebSocket and HTTP-streaming, and acts on network and back/forward cache events.
+Status: in progress. Steps 1–8 are done: the client works in a browser over WebSocket and HTTP-streaming, and acts on network and back/forward cache events.
 
 ## Summary
 
@@ -816,6 +816,25 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   build there and not later during transport work.
 - `Statistics::connected_since` keeps its `Option<std::time::SystemTime>`
   type, filled from `rt::system_now()`.
+
+**Result (done).**
+- `EventDelivery::default()` is `Inline` on wasm32, `Thread` natively.
+- `build()` on wasm32 refuses an explicit `proxy()`, `tls()` (with
+  `danger_accept_invalid_certs` in it), non-empty `http_headers()` and
+  `EventDelivery::Thread`, and a missing `setTimeout` / `clearTimeout`, or
+  `WebSocket`, or `fetch` / `AbortController`, for the configured endpoints
+  (fallbacks included), all in `platform::check_build`. The builder records
+  whether `proxy()` / `tls()` were called; `set_proxy` refuses anything but
+  `ProxyConfig::System` in a browser.
+- `ClientBuilder::credentials(Credentials)` (`SameOrigin`, the default;
+  `Include`; `Omit`) sets `fetch`'s mode. Following decision 6, setting it
+  on another target fails `build()`.
+- The native futures' `Send` contract is asserted at compile time; a
+  browser test uses handlers that capture an `Rc` with the default
+  settings, and awaits `close()` holding one.
+- Browser tests: the defaults, each refused option, and `Include`
+  cross-origin (Centrifugo answers CORS with credentials).
+  `cargo semver-checks` finds no breaking change.
 
 ### 9. Browser tests and CI
 - `wasm-bindgen-test` with `wasm-pack test --headless` on Chrome and Firefox,

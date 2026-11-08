@@ -17,13 +17,17 @@ use url::Url;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{AbortController, ReadableStreamDefaultReader, Request, RequestInit, Response};
+use web_sys::{
+    AbortController, ReadableStreamDefaultReader, Request, RequestCredentials, RequestInit,
+    Response,
+};
 
 use super::browser_error::{BrowserError, Failure, failed};
 use super::http_common::{
     PostError, Poster, content_type, emulation_writer, post_status, stream_response,
 };
 use super::{Ctx, Inbound};
+use crate::config::Credentials;
 
 #[wasm_bindgen]
 extern "C" {
@@ -79,6 +83,11 @@ async fn post(
     init.set_headers(&headers);
     init.set_body(&js_sys::Uint8Array::from(body).into());
     init.set_signal(Some(&guard.0.signal()));
+    init.set_credentials(match ctx.credentials {
+        Credentials::Include => RequestCredentials::Include,
+        Credentials::Omit => RequestCredentials::Omit,
+        _ => RequestCredentials::SameOrigin,
+    });
     let request =
         Request::new_with_str_and_init(url.as_str(), &init).map_err(js_failure(Failure::Fetch))?;
     let resp = JsFuture::from(global_fetch(&request))

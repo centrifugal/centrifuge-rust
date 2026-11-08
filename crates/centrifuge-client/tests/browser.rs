@@ -288,3 +288,60 @@ async fn lifecycle_events_close_and_reconnect() {
     );
     c.close().await;
 }
+
+/// The browser defaults: `Inline` delivery (nothing set), and handlers that
+/// aren't `Send` (they capture an `Rc`), awaited from a `!Send` context.
+#[wasm_bindgen_test]
+async fn defaults_and_non_send_handlers() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let s = seen.clone();
+    let c = Client::builder_with_transports([endpoint(false)])
+        .on_connected(move |_, _| s.borrow_mut().push("connected"))
+        .build()
+        .expect("the default event delivery works in a browser");
+    let s = seen.clone();
+    c.on_disconnected(move |_, _| s.borrow_mut().push("disconnected"));
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let held = seen.clone(); // an `Rc` held across the await
+    c.close().await;
+    assert_eq!(*held.borrow(), ["connected", "disconnected"]);
+}
+
+/// Options a browser decides by itself fail `build()` when set.
+#[wasm_bindgen_test]
+fn browser_refuses_what_it_decides() {
+    let b = || Client::builder_with_transports([endpoint(false)]);
+    let err = |r: Result<Client, centrifuge::Error>| r.unwrap_err().to_string();
+    assert!(err(b().proxy(centrifuge::ProxyConfig::None).build()).contains("proxy()"));
+    assert!(err(b().tls(centrifuge::TlsConfig::new()).build()).contains("tls()"));
+    let mut h = http::HeaderMap::new();
+    h.insert("x-a", http::HeaderValue::from_static("1"));
+    assert!(err(b().http_headers(h).build()).contains("emulated_headers"));
+    assert!(err(b().event_delivery(EventDelivery::Thread).build()).contains("Inline"));
+    // The default proxy is fine; so is setting it back to `System`.
+    let c = b().build().unwrap();
+    assert!(c.set_proxy(centrifuge::ProxyConfig::System).is_ok());
+    assert!(c.set_proxy(centrifuge::ProxyConfig::None).is_err());
+}
+
+/// `Credentials::Include` over cross-origin HTTP-streaming: the server's
+/// CORS setup must allow credentials.
+#[wasm_bindgen_test]
+async fn http_stream_with_credentials() {
+    let c = Client::builder_with_transports([endpoint(true)])
+        .credentials(centrifuge::Credentials::Include)
+        .build()
+        .unwrap();
+    c.connect().unwrap();
+    c.ready(Some(Duration::from_secs(5)))
+        .await
+        .expect("connected");
+    c.publish(&format!("recovery:browser_c_{}", js_sys::Date::now()), "1")
+        .await
+        .expect("an emulation request with credentials");
+    c.close().await;
+}
