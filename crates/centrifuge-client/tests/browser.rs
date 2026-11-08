@@ -20,9 +20,18 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 wasm_bindgen_test_configure!(run_in_browser);
 
 const WS: &str = "ws://localhost:8010/connection/websocket";
+const HTTP_STREAM: &str = "http://localhost:8010/connection/http_stream";
 
-async fn connect_subscribe_publish(protocol: Protocol) {
-    let client = Client::builder_with_transports([TransportEndpoint::websocket(WS)])
+fn endpoint(http_stream: bool) -> TransportEndpoint {
+    if http_stream {
+        TransportEndpoint::http_stream(HTTP_STREAM)
+    } else {
+        TransportEndpoint::websocket(WS)
+    }
+}
+
+async fn connect_subscribe_publish(protocol: Protocol, http_stream: bool) {
+    let client = Client::builder_with_transports([endpoint(http_stream)])
         .protocol(protocol)
         .event_delivery(EventDelivery::Inline)
         .build()
@@ -59,16 +68,33 @@ async fn connect_subscribe_publish(protocol: Protocol) {
 
 #[wasm_bindgen_test]
 async fn websocket_protobuf() {
-    connect_subscribe_publish(Protocol::Protobuf).await;
+    connect_subscribe_publish(Protocol::Protobuf, false).await;
 }
 
 #[wasm_bindgen_test]
 async fn websocket_json() {
-    connect_subscribe_publish(Protocol::Json).await;
+    connect_subscribe_publish(Protocol::Json, false).await;
 }
 
-fn client(protocol: Protocol) -> Client {
-    Client::builder_with_transports([TransportEndpoint::websocket(WS)])
+/// Cross-origin `fetch` (the test page isn't on Centrifugo's origin): the
+/// stream request and every emulation POST go through a CORS preflight.
+#[wasm_bindgen_test]
+async fn http_stream_protobuf() {
+    connect_subscribe_publish(Protocol::Protobuf, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn http_stream_json() {
+    connect_subscribe_publish(Protocol::Json, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn http_stream_reconnect_recovers() {
+    reconnect_recovers(true).await;
+}
+
+fn client(protocol: Protocol, http_stream: bool) -> Client {
+    Client::builder_with_transports([endpoint(http_stream)])
         .protocol(protocol)
         .event_delivery(EventDelivery::Inline)
         .min_reconnect_delay(Duration::from_millis(50))
@@ -99,7 +125,11 @@ mod web_sys_global {
 
 #[wasm_bindgen_test]
 async fn reconnect_recovers_missed_publications() {
-    let c = client(Protocol::Protobuf);
+    reconnect_recovers(false).await;
+}
+
+async fn reconnect_recovers(http_stream: bool) {
+    let c = client(Protocol::Protobuf, http_stream);
     let channel = format!("recovery:browser_r_{}", js_sys::Date::now());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx2 = tx.clone();
@@ -122,7 +152,7 @@ async fn reconnect_recovers_missed_publications() {
 
     c.disconnect();
     // Another client publishes while this one is away.
-    let other = client(Protocol::Json);
+    let other = client(Protocol::Json, http_stream);
     other.connect().unwrap();
     for n in ["2", "3"] {
         other.publish(&channel, n).await.unwrap();
@@ -140,7 +170,7 @@ async fn reconnect_recovers_missed_publications() {
 /// no ping within its 35 s window and reconnect.
 #[wasm_bindgen_test]
 async fn stays_connected_across_pings() {
-    let c = client(Protocol::Protobuf);
+    let c = client(Protocol::Protobuf, false);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     c.on_disconnected(move |_, e| {
         let _ = tx.send(format!("disconnected {} {}", e.code, e.reason));
@@ -153,4 +183,39 @@ async fn stays_connected_across_pings() {
     // The client answered the server's pings in the meantime.
     assert!(c.statistics().messages_out >= 2, "{:?}", c.statistics());
     c.close().await;
+}
+
+/// Disconnecting aborts the stream's `fetch`: the server sees the client go
+/// at once, not after its ping timeout (about 25 s). Presence shows it.
+#[wasm_bindgen_test]
+async fn http_stream_disconnect_aborts_the_request() {
+    // Presence is on for channels without a namespace.
+    let channel = format!("browser_p_{}", js_sys::Date::now());
+    let a = client(Protocol::Protobuf, true);
+    let sa = a.new_subscription(&channel).build().unwrap();
+    sa.subscribe();
+    a.connect().unwrap();
+    sa.ready(Some(Duration::from_secs(5))).await.unwrap();
+    let b = client(Protocol::Protobuf, false);
+    let sb = b.new_subscription(&channel).build().unwrap();
+    sb.subscribe();
+    b.connect().unwrap();
+    sb.ready(Some(Duration::from_secs(5))).await.unwrap();
+    assert_eq!(sb.presence().await.unwrap().clients.len(), 2);
+
+    a.disconnect();
+    let mut left = false;
+    for _ in 0..20 {
+        sleep(Duration::from_millis(100)).await;
+        if sb.presence().await.unwrap().clients.len() == 1 {
+            left = true;
+            break;
+        }
+    }
+    assert!(
+        left,
+        "the server still sees the disconnected client after 2 s"
+    );
+    a.close().await;
+    b.close().await;
 }

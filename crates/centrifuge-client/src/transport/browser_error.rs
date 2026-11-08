@@ -86,8 +86,6 @@ pub(crate) enum Failure {
     /// `fetch()` rejected: a network failure, or CORS, which a browser
     /// reports as the same generic error.
     Fetch,
-    /// The HTTP-stream request was answered with a non-2xx status.
-    Status(u16),
     /// The response has no body to stream.
     NoBody,
     /// Reading the response body failed.
@@ -110,10 +108,6 @@ pub(crate) fn failed(what: Failure, err: Option<BrowserError>) -> CloseReason {
         Failure::Fetch => (
             None,
             detail("HTTP-stream request failed (network error or CORS)"),
-        ),
-        Failure::Status(s) => (
-            Some(s),
-            format!("HTTP-stream request answered with status {s}"),
         ),
         Failure::NoBody => (None, "HTTP-stream response has no body".to_owned()),
         Failure::Read => (None, detail("reading the HTTP-stream response failed")),
@@ -173,10 +167,10 @@ mod tests {
         );
         assert_eq!(source.unwrap().to_string(), "TypeError: Failed to fetch");
 
-        let CloseReason::Failed { status, source, .. } = failed(Failure::Status(503), None) else {
+        let CloseReason::Failed { status, source, .. } = failed(Failure::NoBody, None) else {
             panic!("not Failed");
         };
-        assert_eq!(status, Some(503));
+        assert_eq!(status, None);
         assert!(source.is_none());
 
         let CloseReason::Failed { message, .. } = failed(Failure::Unsupported("WebSocket"), None)

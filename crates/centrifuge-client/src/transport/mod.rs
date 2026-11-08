@@ -13,6 +13,8 @@ pub(crate) mod net;
 #[cfg(target_arch = "wasm32")]
 #[path = "net_wasm.rs"]
 pub(crate) mod net;
+#[cfg(all(feature = "http-stream", target_arch = "wasm32"))]
+mod web_http;
 #[cfg(target_arch = "wasm32")]
 mod web_ws;
 #[cfg(not(target_arch = "wasm32"))]
@@ -246,6 +248,8 @@ pub(crate) async fn run(ctx: Ctx, initial: Option<proto::Command>) {
         TransportKind::WebSocket => web_ws::run(ctx).await,
         #[cfg(all(feature = "http-stream", not(target_arch = "wasm32")))]
         TransportKind::HttpStream => http_stream::run(ctx, initial).await,
+        #[cfg(all(feature = "http-stream", target_arch = "wasm32"))]
+        TransportKind::HttpStream => web_http::run(ctx, initial).await,
         #[allow(unreachable_patterns)]
         _ => {
             let _ = initial;

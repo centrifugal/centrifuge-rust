@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: in progress. Steps 1–6 are done: the client works in a browser over WebSocket; HTTP-streaming is next.
+Status: in progress. Steps 1–7 are done: the client works in a browser over WebSocket and HTTP-streaming.
 
 ## Summary
 
@@ -692,6 +692,21 @@ tests passed 15 runs in a row. Found on the way, for the docs (step 10):
     `fetch` goes through CORS;
   - custom HTTP headers can't be set on a browser WebSocket, which is why
     `http_headers` is rejected and `emulated_headers` exists (decision 6).
+
+**Result (done).** `transport/web_http.rs`: the stream and every emulation
+POST hold their own `AbortController` behind a guard that aborts on drop;
+`fetch` is the global one (window or worker). The writer, the emulation URL,
+content types, the stream response check (non-2xx, captive-portal HTML) and
+the POST status rules moved to `transport/http_common.rs`, shared with the
+native transport, which only keeps hyper behind a `Poster` trait (no native
+change; its tests pass). Browser tests, cross-origin (CORS preflight
+included) against Centrifugo: protobuf and JSON, reconnect with recovery,
+and a disconnect that the server sees at once (presence drops within 2 s;
+with the abort removed, the test fails). Left for later:
+- the `credentials` option: step 8, with the other browser options;
+- a POST hanging when its session closes is covered by the shared writer
+  (natively tested, #7) and the same guard, not by a browser test, which
+  would need a server that hangs emulation requests (step 9).
 
 ### 7a. Browser lifecycle events (network, back/forward cache)
 
