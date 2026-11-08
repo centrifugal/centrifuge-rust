@@ -1,6 +1,6 @@
 # Wasm (browser) support: implementation plan
 
-Status: proposal. Nothing here is implemented yet.
+Status: in progress. Steps 1–3 are done: the client builds for wasm32, without browser transports yet.
 
 ## Summary
 
@@ -11,8 +11,8 @@ Status: proposal. Nothing here is implemented yet.
   and `fetch` behind the existing internal trait).
 - **No tokio runtime in the browser**: only `tokio::sync` and `select!`.
 - **Native API and behavior unchanged.** The wasm differences: `Inline`
-  event delivery by default, `close()` without `Send`, no `runtime()` and
-  no `TlsConfig::rustls_client_config` (feature `rustls-config`).
+  event delivery by default, no `runtime()` and no
+  `TlsConfig::rustls_client_config` (feature `rustls-config`).
 - **Platform checks in one `platform` module**: what can never work fails
   at `build()`; what can become true later is checked per attempt and
   retried.
@@ -33,8 +33,9 @@ Run `centrifuge-client` on `wasm32-unknown-unknown` with both transports
 behavior** (spec §9.11). On wasm, the API may differ in defaults and trait
 bounds where the browser execution model requires it; each difference is
 listed and documented (the `EventDelivery` default, decision 8; the
-`close()` future without `Send`, step 8; native-only `runtime()`, decision 6,
-and `TlsConfig::rustls_client_config`, step 8).
+native-only `runtime()`, decision 6; and `TlsConfig::rustls_client_config`,
+step 8). `close()` keeps its `Send` future on both: it only awaits a
+`tokio::sync::oneshot` receiver, which is `Send` on wasm too (step 3).
 
 ## Verified starting point
 
@@ -83,7 +84,7 @@ time API.
 | `tokio::task_local!` | `dispatch.rs`: `IN_CALLBACK` (34), read by `in_callback()` (46); `.scope(..)` in `driver.rs` (509, 530, 543) | `rt::callback_scope` / `rt::in_callback` |
 | `tokio::time::{Instant, sleep_until, timeout, timeout_at}` | `calls.rs`: call deadlines (108, 193, 229–239, 252, 266), `ready()` / `sub.ready()` timeouts (314, 368) | `rt` |
 | `tokio::time::{interval, Interval, MissedTickBehavior::Delay}`, `sleep_until` | `driver.rs`: the 2 s watchdog (155–156, 179), the core's next deadline (184) | `rt` |
-| `std::time::Instant` | `driver.rs`: `now()` for the core (150–151), the watchdog's monotonic half (83, 142, 271); `transport/mod.rs`: `LastReceived` (118, 125, 137) | `rt::Instant` (`now()` panics on wasm) |
+| `std::time::Instant` | `driver.rs`: `now()` for the core (150–151), the watchdog's monotonic half (83, 142, 271); `transport/mod.rs`: `LastReceived` (118, 125, 137) | the driver's `now()`: `rt::Instant`; the watchdog and `LastReceived`, which read the real clock: the core's `Instant` (`std::time::Instant::now()` panics on wasm) |
 | `std::time::Instant` in the **core's** API | `centrifuge-client-core`: `Core::step(input, now)`, `next_deadline()`, `last_received`, the timer wheel; the core itself only calls `now()` in tests | `centrifuge_client_core::time::Instant`: `std::time::Instant` on native, `web_time::Instant` on wasm (step 3) |
 | `SystemTime::now()` | `driver.rs`: watchdog (142, 271), `connected_since` (429); `client.rs`: `random_seed` (1000) | `rt::system_now()` |
 | `SystemTime` in the **public** API | `Statistics::connected_since` (`stats.rs`), `Shared::connected_since` | stays `std::time::SystemTime` |
@@ -96,7 +97,7 @@ time API.
 | `dispatch.rs:63` | handler storage `H<T, E> = Option<Box<dyn FnMut(&T, E) + Send>>` | `+ Send` per target: a `dyn` type can't name `MaybeSend` |
 | `driver.rs:29–46` | `TokenFuture`, `SubTokenFuture`, `StateFuture` (`+ Send`) and their getters (`+ Send + Sync`) | the same |
 | `dispatch.rs:565–580` | the event thread's `Box<dyn FnOnce() + Send>` | native-only with the thread |
-| `client.rs:187` | `close()` returns `impl Future + Send` | two signatures (step 8) |
+| `client.rs:187` | `close()` returns `impl Future + Send` | unchanged: the future only awaits a `oneshot` receiver, `Send` on wasm too |
 | `error.rs` | `BoxError`, `ArcError`, `From<E: Error + Send + Sync>` for `TokenError` | unchanged: public types, and errors are plain data. A browser error (`JsValue`) is converted to a message first |
 
 No `select!` holds a non-`Send` value across an `.await` once the aliases
@@ -310,28 +311,28 @@ wasm (a target-specific dependency). On native `web_time::Instant` is
 client can produce one, which it can't for `std::time::Instant`.
 
 The interface, fixed by step 2's audit. Its only additions: the core's
-`Instant` above, and `LastReceived` in `transport/mod.rs` reading
-`rt::Instant` like the driver.
+`Instant` above, which the watchdog and `LastReceived` (`transport/mod.rs`)
+also read: they use the real clock natively, not Tokio's, and stay so.
 
 ```rust
-// Tasks
+// Tasks: an abort-only handle with `abort()` and `is_finished()` (the driver
+// prunes finished callback tasks)
 pub(crate) fn spawn<F>(future: F) -> AbortHandle
 where
     F: Future<Output = ()> + MaybeSend + 'static;
 
 // Monotonic time
 pub(crate) struct Instant { /* tokio::time::Instant on native, web_time::Instant on wasm */ }
-// The core's `Instant`: `into_std()` / `from_std()` on native (tokio's clock,
-// so tests with paused time also move the core's), identity on wasm.
-impl Instant {
-    pub(crate) fn now() -> Self;
-    pub(crate) fn into_core(self) -> centrifuge_client_core::time::Instant;
-    pub(crate) fn from_core(at: centrifuge_client_core::time::Instant) -> Self;
-}
+// To and from the core's `Instant`: `into_std()` / `from_std()` on native
+// (Tokio's clock, so tests with paused time also move the core's), identity
+// on wasm. Free functions: Tokio's `Instant` can't get methods.
+pub(crate) fn to_core(at: Instant) -> centrifuge_client_core::time::Instant;
+pub(crate) fn from_core(at: centrifuge_client_core::time::Instant) -> Instant;
 pub(crate) async fn sleep_until(deadline: Instant);
 pub(crate) async fn timeout<F: Future>(d: Duration, f: F) -> Result<F::Output, Elapsed>;
 pub(crate) async fn timeout_at<F: Future>(deadline: Instant, f: F) -> Result<F::Output, Elapsed>;
 pub(crate) struct Interval; // with tick() and missed-tick "Delay" behaviour
+pub(crate) fn interval(period: Duration) -> Interval;
 
 // Task-local marker for "this task runs a token or state callback of client
 // `id`" (§9.5), replacing `tokio::task_local!` for `IN_CALLBACK`
@@ -459,6 +460,15 @@ pub(crate) fn random_seed() -> u64;
   (`derive_more`, `futures-buffered`, `futures-lite`, `pin-project`,
   `tokio-util`, `send_wrapper`, `cfg_aliases`), forces tokio `test-util` on
   native users, and is 0.x with a much broader surface than we need.
+
+**Result (done).** `platform` (Android's checks moved, same errors at the
+same points), the core's `time::Instant`, and `rt` with both halves; on wasm
+the handler and callback storage drops `Send` (`dyn_send!`), and the event
+thread and runtime handle are native-only. The client builds for
+`wasm32-unknown-unknown`; until steps 6–7 a wasm client has no transport.
+Deviations from the sketch above: `close()` needs no wasm signature (see
+Goal), the handle also has `is_finished()`, and the `Instant` conversions
+are free functions.
 
 ### 4. Verify native behavior
 - Full native test suite, `cargo semver-checks`.
@@ -658,8 +668,10 @@ step 9 widens the coverage.
 ### 8. Public API and configuration (non-breaking)
 
 The `cfg` gating needed to compile (`runtime()`, the builder's `runtime`
-field, `Dispatcher::new`, the `close()` signatures) lands with `rt` in step 3,
-since the wasm build fails without it. This step adds what is left:
+field, `Dispatcher::new`) landed with `rt` in step 3, since the wasm build
+fails without it. On wasm, `Dispatcher::new` already refuses
+`EventDelivery::Thread`; this step moves that to `platform::check_build`
+and makes `Inline` the default. This step adds what is left:
 validation in `build()`, the `TlsConfig` variant, and browser options.
 
 - `ClientBuilder::runtime(tokio::runtime::Handle)`: native only
@@ -688,10 +700,6 @@ validation in `build()`, the `TlsConfig` variant, and browser options.
   `build()` rejects it there anyway. `TlsConfig::rustls_client_config`
   (feature `rustls-config`) is native-only: it takes a
   `rustls::ClientConfig`.
-- `close()`: two `cfg`-gated signatures. Native stays exactly
-  `impl Future<Output = ()> + Send + 'static`; wasm drops `Send`. Do not
-  switch to a boxed named future: that would change the API and add an
-  allocation.
 - Extend the compile-time assertion in `client.rs` (`send_sync`) to the
   futures the SDK returns, so their native `Send` contract is tested, not
   just checked by `semver-checks`.
