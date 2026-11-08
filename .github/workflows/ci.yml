@@ -306,7 +306,12 @@ jobs:
         if: matrix.browser == 'chrome'
         working-directory: tests/browser-e2e
         run: |
-          cargo build --target wasm32-unknown-unknown --locked
+          # Not --locked: on CI this lockfile needed an update that a fresh
+          # local clone doesn't; the diff below shows what (a test harness,
+          # so a re-resolve is harmless).
+          cargo build --target wasm32-unknown-unknown
+          git diff --stat -- Cargo.lock
+          git diff -- Cargo.lock | head -60
           wasm-bindgen --target web --out-dir www/pkg target/wasm32-unknown-unknown/debug/browser_e2e.wasm
           npm ci --no-fund --no-audit
           node run.mjs
