@@ -60,6 +60,7 @@ pub(crate) struct SubCallbacks {
 pub(crate) struct DriverConfig {
     pub(crate) endpoints: Vec<(TransportKind, Url)>,
     pub(crate) emulation_endpoint: Option<Url>,
+    pub(crate) subprotocols: Vec<String>,
     pub(crate) max_message_size: usize,
     pub(crate) get_token: Option<ConnTokenGetter>,
     /// The browser `fetch` credentials mode.
@@ -486,6 +487,7 @@ impl Driver {
             max_message_size: self.cfg.max_message_size,
             http_headers: lock(&self.shared.http_headers).clone(),
             emulation_endpoint: self.cfg.emulation_endpoint.clone(),
+            subprotocols: self.cfg.subprotocols.clone(),
             timeout: self.shared.cfg.timeout,
             net: self.shared.net.clone(),
             shared: self.shared.clone(),

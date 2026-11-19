@@ -19,7 +19,7 @@ use url::Url;
 use crate::calls;
 use crate::config::{
     Credentials, EventDelivery, ProxyConfig, TlsConfig, TransportEndpoint, check_http_headers,
-    defaults, duration,
+    check_subprotocols, defaults, duration,
 };
 use crate::dispatch::{ClientHandlers, Delivery, Dispatcher, in_handler};
 use crate::driver::{ConnTokenGetter, Driver, DriverConfig, TokenFuture};
@@ -641,6 +641,7 @@ pub struct ClientBuilder {
     http_headers: http::HeaderMap,
     emulated_headers: HashMap<String, String>,
     emulation_endpoint: Option<String>,
+    subprotocols: Vec<String>,
     timeout: Duration,
     handshake_timeout: Duration,
     min_reconnect_delay: Duration,
@@ -691,6 +692,7 @@ impl ClientBuilder {
             http_headers: http::HeaderMap::new(),
             emulated_headers: HashMap::new(),
             emulation_endpoint: None,
+            subprotocols: Vec::new(),
             timeout: defaults::TIMEOUT,
             handshake_timeout: defaults::HANDSHAKE_TIMEOUT,
             min_reconnect_delay: defaults::MIN_RECONNECT_DELAY,
@@ -789,6 +791,19 @@ impl ClientBuilder {
     /// Works in browsers too.
     pub fn emulated_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.emulated_headers = headers;
+        self
+    }
+
+    /// Extra WebSocket subprotocols to offer in `Sec-WebSocket-Protocol`,
+    /// after `centrifuge-protobuf` (Protobuf only). The server picks one;
+    /// whichever it picks must be one offered. Each value must be an HTTP
+    /// token (RFC 6455 §4.1). WebSocket transports only. Default: none.
+    pub fn websocket_subprotocols<I, S>(mut self, subprotocols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.subprotocols = subprotocols.into_iter().map(Into::into).collect();
         self
     }
 
@@ -954,6 +969,7 @@ impl ClientBuilder {
             ));
         }
         check_http_headers(&self.http_headers)?;
+        check_subprotocols(&self.subprotocols)?;
         codec::validate_payload(self.protocol, "data", &self.data)
             .map_err(|e| Error::InvalidData(e.to_string()))?;
         let emulation_endpoint = match &self.emulation_endpoint {
@@ -1028,6 +1044,7 @@ impl ClientBuilder {
             DriverConfig {
                 endpoints,
                 emulation_endpoint,
+                subprotocols: self.subprotocols,
                 max_message_size: self.max_message_size,
                 get_token: self.get_token,
                 #[cfg(all(target_arch = "wasm32", feature = "http-stream"))]

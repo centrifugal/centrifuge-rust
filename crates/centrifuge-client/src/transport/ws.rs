@@ -113,11 +113,15 @@ async fn open(ctx: &Ctx) -> Result<Ws, CloseReason> {
     for (k, v) in &ctx.http_headers {
         req.headers_mut().append(k, v.clone());
     }
-    if ctx.protocol == Protocol::Protobuf {
-        req.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            http::HeaderValue::from_static("centrifuge-protobuf"),
-        );
+    let offered = ctx.offered_subprotocols();
+    if !offered.is_empty() {
+        let value =
+            http::HeaderValue::from_str(&offered.join(", ")).map_err(|e| CloseReason::Failed {
+                status: None,
+                message: e.to_string(),
+                source: None,
+            })?;
+        req.headers_mut().insert("Sec-WebSocket-Protocol", value);
     }
     let config = WebSocketConfig::default()
         .max_message_size(Some(ctx.max_message_size))

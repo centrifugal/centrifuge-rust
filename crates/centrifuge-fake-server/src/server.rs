@@ -149,11 +149,13 @@ async fn websocket(inner: Arc<Inner>, mut req: Request<Incoming>) -> Response<Bo
     let Some(key) = req.headers().get("sec-websocket-key").cloned() else {
         return full(StatusCode::BAD_REQUEST, "not a WebSocket upgrade");
     };
-    let protobuf = req
+    let offered: Vec<String> = req
         .headers()
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|p| p.trim() == "centrifuge-protobuf"));
+        .map(|v| v.split(',').map(|p| p.trim().to_owned()).collect())
+        .unwrap_or_default();
+    let protobuf = offered.iter().any(|p| p == "centrifuge-protobuf");
     let protocol = if protobuf {
         Protocol::Protobuf
     } else {
@@ -174,10 +176,15 @@ async fn websocket(inner: Arc<Inner>, mut req: Request<Incoming>) -> Response<Bo
         "sec-websocket-accept",
         accept.parse().expect("base64 is a valid header"),
     );
-    if protobuf {
+    let selected = if protobuf {
+        Some("centrifuge-protobuf")
+    } else {
+        offered.first().map(String::as_str)
+    };
+    if let Some(p) = selected {
         h.insert(
             "sec-websocket-protocol",
-            "centrifuge-protobuf".parse().expect("static header"),
+            p.parse().expect("a valid subprotocol token"),
         );
     }
     resp

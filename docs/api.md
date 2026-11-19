@@ -79,6 +79,7 @@ impl ClientBuilder {
     pub fn version(self, v: impl Into<String>) -> Self;                // ≤ 64 chars
     pub fn http_headers(self, h: http::HeaderMap) -> Self;             // managed headers (Host, Upgrade, …) rejected
     pub fn emulated_headers(self, h: HashMap<String, String>) -> Self;
+    pub fn websocket_subprotocols<I, S>(self, subprotocols: I) -> Self;  // extra Sec-WebSocket-Protocol values; default: none
     pub fn emulation_endpoint(self, url: impl Into<String>) -> Self;   // default: /emulation on the stream's origin
     pub fn timeout(self, d: Duration) -> Self;                         // 5 s
     pub fn handshake_timeout(self, d: Duration) -> Self;               // 5 s
