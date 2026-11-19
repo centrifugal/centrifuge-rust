@@ -653,6 +653,7 @@ pub struct ClientBuilder {
     /// can't serve fails `build()`, while the default is best effort.
     tls_set: bool,
     proxy_set: bool,
+    require_tls: bool,
     // Only the browser's `fetch` reads it.
     #[cfg_attr(
         not(all(target_arch = "wasm32", feature = "http-stream")),
@@ -701,6 +702,7 @@ impl ClientBuilder {
             proxy: ProxyConfig::default(),
             tls_set: false,
             proxy_set: false,
+            require_tls: false,
             credentials: None,
             event_delivery: EventDelivery::default(),
             handlers: ClientHandlers::default(),
@@ -844,6 +846,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Refuses clear-text connections: with `true`, `build()` fails for a
+    /// `ws://` or `http://` endpoint (or emulation endpoint) and for
+    /// [`TlsConfig::danger_accept_invalid_certs`]. Default: `false`.
+    pub fn require_tls(mut self, required: bool) -> Self {
+        self.require_tls = required;
+        self
+    }
+
     /// Proxy configuration. Default: [`ProxyConfig::System`], which in a
     /// browser means "the browser decides". Setting it in a browser fails
     /// `build()`.
@@ -970,6 +980,23 @@ impl ClientBuilder {
             }
             None => None,
         };
+        if self.require_tls {
+            let plain = endpoints
+                .iter()
+                .map(|(_, u)| u)
+                .chain(emulation_endpoint.as_ref())
+                .find(|u| matches!(u.scheme(), "ws" | "http"));
+            if let Some(u) = plain {
+                return Err(Error::Configuration(format!(
+                    "require_tls: {u} is not a TLS endpoint (use wss:// or https://)"
+                )));
+            }
+            if self.tls.accept_invalid {
+                return Err(Error::Configuration(
+                    "require_tls: danger_accept_invalid_certs is set".into(),
+                ));
+            }
+        }
         crate::platform::check_build(&crate::platform::BuildCheck {
             endpoints: &endpoints,
             emulation: emulation_endpoint.as_ref(),

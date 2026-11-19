@@ -4,6 +4,14 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+### Added
+
+- `ClientBuilder::require_tls(bool)`: with `true`, `build()` fails with `Error::Configuration` for a `ws://` or `http://` endpoint or emulation endpoint, and for `TlsConfig::danger_accept_invalid_certs`. Default `false`: no change in behaviour.
+
+### Fixed
+
+- Browsers: the `fetch` HTTP-streaming transport no longer follows redirects (`redirect: "error"`), matching the native transports. Before, a redirect re-sent the connect request, including its token, to the new location.
+
 ## [0.1.2]
 
 ### Added

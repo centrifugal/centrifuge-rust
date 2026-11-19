@@ -87,6 +87,7 @@ impl ClientBuilder {
     pub fn max_server_ping_delay(self, d: Duration) -> Self;           // 10 s
     pub fn max_message_size(self, bytes: usize) -> Self;               // 64 MiB
     pub fn tls(self, t: TlsConfig) -> Self;
+    pub fn require_tls(self, required: bool) -> Self;                  // false (default); true: build() refuses ws://, http:// and danger_accept_invalid_certs
     pub fn proxy(self, p: ProxyConfig) -> Self;                        // ProxyConfig::System (default)
     pub fn event_delivery(self, m: EventDelivery) -> Self;             // Thread (default) | Inline
     // + every on_* handler from Client

@@ -19,7 +19,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     AbortController, ReadableStreamDefaultReader, Request, RequestCredentials, RequestInit,
-    Response,
+    RequestRedirect, Response,
 };
 
 use super::browser_error::{BrowserError, Failure, failed};
@@ -83,6 +83,9 @@ async fn post(
     init.set_headers(&headers);
     init.set_body(&js_sys::Uint8Array::from(body).into());
     init.set_signal(Some(&guard.0.signal()));
+    // The native transports never follow a redirect; a followed one would
+    // re-send the body (the connect command) to another location.
+    init.set_redirect(RequestRedirect::Error);
     init.set_credentials(match ctx.credentials {
         Credentials::Include => RequestCredentials::Include,
         Credentials::Omit => RequestCredentials::Omit,
