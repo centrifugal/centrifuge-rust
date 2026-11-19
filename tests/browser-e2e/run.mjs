@@ -15,6 +15,10 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'applic
 // records whether the browser aborted each request.
 const hung = { open: 0, aborted: 0 };
 
+// Requests that a /redirect/... answer sent elsewhere and reached: none
+// may, as natively a redirect is never followed.
+const redirected = [];
+
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/emulation-hang')) {
     hung.open += 1;
@@ -24,6 +28,31 @@ const server = http.createServer((req, res) => {
       if (!res.writableEnded) hung.aborted += 1;
     });
     req.resume();
+    return;
+  }
+  // A 307 to another origin (localhost, not 127.0.0.1): a followed one
+  // would re-send the POST body there, the connect command with its token.
+  if (req.url.startsWith('/redirect/')) {
+    req.resume();
+    res.writeHead(307, { Location: `http://localhost:${server.address().port}/redirected` }).end();
+    return;
+  }
+  if (req.url.startsWith('/redirected')) {
+    const cors = {
+      'Access-Control-Allow-Origin': req.headers.origin ?? '*',
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Methods': 'POST',
+    };
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors).end();
+      return;
+    }
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      redirected.push(Buffer.concat(chunks).toString());
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }).end();
+    });
     return;
   }
   const file = path.join(www, new URL(req.url, 'http://x').pathname);
@@ -132,6 +161,29 @@ await test('hanging_post', async (page) => {
   while (hung.aborted < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 50));
   if (hung.aborted < 1) throw new Error(`the server saw ${hung.open} requests, none aborted`);
   console.log(`     send() failed ${ms} ms after the disconnect; the server saw the POST aborted`);
+});
+
+// A 307 to the HTTP-stream request: the connect attempt fails as a redirect.
+await test('redirect_stream', async (page) => {
+  redirected.length = 0;
+  const error = await page.evaluate((s) => window.streamError(s), `${base}/redirect/stream`);
+  await new Promise((r) => setTimeout(r, 200));
+  if (redirected.length) throw new Error(`the redirect was followed: ${redirected[0].slice(0, 100)}`);
+  if (!error.includes('redirect')) throw new Error(`the client reported ${error}`);
+  console.log(`     not followed: ${error}`);
+});
+
+// A 307 to an emulation POST: the session is lost and the client reconnects.
+await test('redirect_emulation', async (page) => {
+  redirected.length = 0;
+  const reason = await page.evaluate(
+    ([s, e]) => window.emulationReconnect(s, e),
+    ['http://localhost:8010/connection/http_stream', `${base}/redirect/emulation`],
+  );
+  await new Promise((r) => setTimeout(r, 200));
+  if (redirected.length) throw new Error(`the redirect was followed: ${redirected[0].slice(0, 100)}`);
+  if (reason === 'none') throw new Error('the client stayed connected');
+  console.log(`     not followed, reconnecting: ${reason}`);
 });
 
 await within(10_000, 'closing the browser', browser.close()).catch((e) => console.log(`  ${e.message}`));

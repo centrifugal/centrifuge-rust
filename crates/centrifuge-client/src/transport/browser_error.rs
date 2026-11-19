@@ -88,6 +88,9 @@ pub(crate) enum Failure {
     /// `fetch()` rejected: a network failure, or CORS, which a browser
     /// reports as the same generic error.
     Fetch,
+    /// The server answered with a redirect, which isn't followed. The browser
+    /// hides its status and location.
+    Redirect,
     /// The response has no body to stream.
     NoBody,
     /// Reading the response body failed.
@@ -110,6 +113,10 @@ pub(crate) fn failed(what: Failure, err: Option<BrowserError>) -> CloseReason {
         Failure::Fetch => (
             None,
             detail("HTTP-stream request failed (network error or CORS)"),
+        ),
+        Failure::Redirect => (
+            None,
+            "HTTP-stream request answered with a redirect (not followed)".to_owned(),
         ),
         Failure::NoBody => (None, "HTTP-stream response has no body".to_owned()),
         Failure::Read => (None, detail("reading the HTTP-stream response failed")),
@@ -180,5 +187,10 @@ mod tests {
             panic!("not Failed");
         };
         assert!(message.contains("no `WebSocket`"), "{message}");
+
+        let CloseReason::Failed { message, .. } = failed(Failure::Redirect, None) else {
+            panic!("not Failed");
+        };
+        assert!(message.contains("redirect"), "{message}");
     }
 }

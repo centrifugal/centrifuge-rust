@@ -19,7 +19,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     AbortController, ReadableStreamDefaultReader, Request, RequestCredentials, RequestInit,
-    Response,
+    RequestRedirect, Response, ResponseType,
 };
 
 use super::browser_error::{BrowserError, Failure, failed};
@@ -83,6 +83,10 @@ async fn post(
     init.set_headers(&headers);
     init.set_body(&js_sys::Uint8Array::from(body).into());
     init.set_signal(Some(&guard.0.signal()));
+    // Never followed, as natively: a browser re-sends the POST body (the
+    // connect command with its token) to wherever a 307/308 points. `manual`
+    // rather than `error` keeps a redirect apart from a network failure.
+    init.set_redirect(RequestRedirect::Manual);
     init.set_credentials(match ctx.credentials {
         Credentials::Include => RequestCredentials::Include,
         Credentials::Omit => RequestCredentials::Omit,
@@ -99,6 +103,9 @@ async fn post(
             Some(BrowserError::new(None, "not a Response")),
         )
     })?;
+    if resp.type_() == ResponseType::Opaqueredirect {
+        return Err(failed(Failure::Redirect, None));
+    }
     Ok((resp, guard))
 }
 

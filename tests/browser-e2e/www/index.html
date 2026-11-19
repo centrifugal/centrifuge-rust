@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <title>centrifuge-rust browser e2e</title>
 <script type="module">
-  import init, { start, hanging_post } from './pkg/browser_e2e.js';
+  import init, { start, hanging_post, stream_error, emulation_reconnect } from './pkg/browser_e2e.js';
   const ws = 'ws://localhost:8010/connection/websocket';
   window.restored = false;
   addEventListener('pageshow', (e) => { if (e.persisted) window.restored = true; });
@@ -17,5 +17,7 @@
     window.worker = w;
   });
   window.hangingPost = (stream, emulation) => hanging_post(stream, emulation);
+  window.streamError = (stream) => stream_error(stream);
+  window.emulationReconnect = (stream, emulation) => emulation_reconnect(stream, emulation);
   window.ready = true;
 </script>
