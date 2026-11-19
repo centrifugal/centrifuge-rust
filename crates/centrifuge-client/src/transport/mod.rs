@@ -173,6 +173,7 @@ pub(crate) struct Ctx {
     pub(crate) http_headers: http::HeaderMap,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) emulation_endpoint: Option<Url>,
+    pub(crate) subprotocols: Vec<String>,
     #[cfg_attr(not(feature = "http-stream"), allow(dead_code))]
     pub(crate) timeout: std::time::Duration,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -189,6 +190,16 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
+    /// The `Sec-WebSocket-Protocol` values to offer: `centrifuge-protobuf`
+    /// for Protobuf, then the app's own.
+    pub(crate) fn offered_subprotocols(&self) -> Vec<String> {
+        let first = (self.protocol == Protocol::Protobuf).then(|| "centrifuge-protobuf".to_owned());
+        first
+            .into_iter()
+            .chain(self.subprotocols.iter().cloned())
+            .collect()
+    }
+
     async fn report(&self, msg: Inbound) {
         let _ = self.inbound.send(msg).await;
     }

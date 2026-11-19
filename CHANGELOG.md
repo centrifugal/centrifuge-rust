@@ -4,6 +4,10 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+### Added
+
+- `ClientBuilder::websocket_subprotocols`: extra values offered in `Sec-WebSocket-Protocol`, after `centrifuge-protobuf` for Protobuf; on native and in browsers. Values must be HTTP tokens, else `build()` fails with `Error::Configuration`.
+
 ## [0.1.2]
 
 ### Added

@@ -415,6 +415,22 @@ pub(crate) fn duration(name: &str, d: Duration) -> Result<Duration, Error> {
     Ok(d)
 }
 
+/// Each value must be an HTTP token, as `Sec-WebSocket-Protocol` requires.
+pub(crate) fn check_subprotocols(values: &[String]) -> Result<(), Error> {
+    const TOKEN_SYMBOLS: &str = "!#$%&'*+-.^_`|~";
+    for v in values {
+        let ok = !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || TOKEN_SYMBOLS.contains(c));
+        if !ok {
+            return Err(Error::Configuration(format!(
+                "invalid WebSocket subprotocol {v:?}: must be a non-empty HTTP token"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Headers the transport manages and the app may not set (docs/spec.md §5.1).
 pub(crate) fn check_http_headers(h: &http::HeaderMap) -> Result<(), Error> {
     for name in h.keys() {

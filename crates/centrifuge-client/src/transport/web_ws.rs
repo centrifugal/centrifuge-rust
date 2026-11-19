@@ -14,8 +14,8 @@ use bytes::Bytes;
 use centrifuge_client_core::codec::{self, Protocol};
 use centrifuge_client_core::machine::CloseReason;
 use tokio::sync::mpsc;
-use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::{JsCast as _, JsValue};
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
 use super::browser_error::{BrowserError, Failure, failed};
@@ -74,10 +74,12 @@ impl Session {
             return Err(failed(Failure::Unsupported("WebSocket"), None));
         }
         // The constructor throws on an invalid URL or subprotocol.
-        let ws = if ctx.protocol == Protocol::Protobuf {
-            WebSocket::new_with_str(ctx.url.as_str(), SUBPROTOCOL)
-        } else {
+        let offered = ctx.offered_subprotocols();
+        let ws = if offered.is_empty() {
             WebSocket::new(ctx.url.as_str())
+        } else {
+            let list: js_sys::Array = offered.iter().map(|p| JsValue::from_str(p)).collect();
+            WebSocket::new_with_str_sequence(ctx.url.as_str(), &list)
         }
         .map_err(|e| failed(Failure::WsOpen, Some(BrowserError::from_js(&e))))?;
         ws.set_binary_type(BinaryType::Arraybuffer);
