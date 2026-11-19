@@ -4,6 +4,10 @@ Release notes are on the [releases page](https://github.com/centrifugal/centrifu
 
 ## [Unreleased]
 
+### Fixed
+
+- Browsers: the `fetch` HTTP-streaming transport no longer follows redirects, as the native transports never do. Before, a 307 or 308 made the browser re-send the request body, the connect command with its token or an emulation request, to the new location. A redirect now fails the request with its own error ("answered with a redirect"). If your HTTP-streaming endpoint redirects, point the client at the final URL.
+
 ## [0.1.2]
 
 ### Added

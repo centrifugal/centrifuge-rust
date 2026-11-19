@@ -1,7 +1,9 @@
 # Browser e2e
 
 Browser behavior `wasm-bindgen-test` can't drive: the back/forward cache and
-`worker.terminate()`, checked through Centrifugo's presence API.
+`worker.terminate()`, checked through Centrifugo's presence API, a hanging
+emulation POST, and redirects (a 307 to another origin must not be followed),
+checked by the test's own server.
 
 ```sh
 docker compose up -d --wait           # from the repository root
