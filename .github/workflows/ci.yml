@@ -60,7 +60,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS runs in the `apple` job below.
+        os: [ubuntu-latest, windows-latest]
         toolchain: [stable]
         include:
           # Early warning for the next release; failures don't block merges.
@@ -405,19 +406,15 @@ jobs:
           FEATURES: ${{ matrix.features }}
           RUSTFLAGS: -D warnings
 
-  ios:
-    name: builds for iOS (${{ matrix.name }})
+  # macOS tests and the iOS builds in one job: one macOS runner per run, as
+  # GitHub's macOS runners are sometimes not available at all.
+  apple:
+    name: macOS tests and iOS builds
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: all features
-            features: --all-features
-          - name: default features
-            features: ""
-          - name: ring
-            features: --no-default-features --features ring,json,http-stream,system-proxy,delta,serde
+    # A hung test fails here, not at the 6-hour job limit.
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -428,13 +425,19 @@ jobs:
           targets: aarch64-apple-ios
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Word splitting of FEATURES is intended.
-      - run: cargo check -p centrifuge-client --target aarch64-apple-ios $FEATURES --locked
-        env:
-          FEATURES: ${{ matrix.features }}
-          RUSTFLAGS: -D warnings
+      - name: test (macOS)
+        run: cargo test --workspace --all-features --locked --no-fail-fast
+      # Each build runs even if an earlier step failed, so one run reports all.
+      - name: build for iOS (all features)
+        if: ${{ !cancelled() }}
+        run: cargo check -p centrifuge-client --target aarch64-apple-ios --all-features --locked
+      - name: build for iOS (default features)
+        if: ${{ !cancelled() }}
+        run: cargo check -p centrifuge-client --target aarch64-apple-ios --locked
+      - name: build for iOS (ring)
+        if: ${{ !cancelled() }}
+        run: cargo check -p centrifuge-client --target aarch64-apple-ios --no-default-features --features ring,json,http-stream,system-proxy,delta,serde --locked
 
   deny:
     name: cargo-deny (${{ matrix.checks }})
@@ -479,7 +482,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, real-server, examples, msrv, features, minimal-versions, docs, wasm-core, browser, android, ios, deny, typos, zizmor]
+    needs: [fmt, clippy, test, real-server, examples, msrv, features, minimal-versions, docs, wasm-core, browser, android, apple, deny, typos, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled
